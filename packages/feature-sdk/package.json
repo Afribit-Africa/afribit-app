@@ -1,0 +1,8 @@
+{
+  "name": "@afribit/feature-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The contract a feature app receives from the Afribit OS shell.",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

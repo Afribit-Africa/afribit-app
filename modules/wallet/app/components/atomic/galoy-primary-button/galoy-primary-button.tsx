@@ -1,0 +1,51 @@
+import React, { FC, PropsWithChildren } from "react"
+
+import { testProps } from "@app/utils/testProps"
+import { TouchableHighlight } from "@app/utils/touchable-wrapper"
+import { Button, ButtonProps, makeStyles, useTheme } from "@rn-vui/themed"
+import { fonts } from "@app/rne-theme/fonts"
+
+export const GaloyPrimaryButton: FC<PropsWithChildren<ButtonProps>> = (props) => {
+  const styles = useStyles()
+  const {
+    theme: { colors },
+  } = useTheme()
+
+  return (
+    <Button
+      {...(typeof props.title === "string" ? testProps(props.title) : {})}
+      activeOpacity={0.85}
+      TouchableComponent={TouchableHighlight}
+      // The library hardcodes a white spinner for solid buttons. In dark theme
+      // the title on the orange fill is black, so the spinner drifted from the
+      // text it stands in for. Track the title's colour instead.
+      loadingProps={{ color: colors.textOnAccent }}
+      buttonStyle={styles.buttonStyle}
+      titleStyle={styles.titleStyle}
+      disabledStyle={styles.disabledStyle}
+      disabledTitleStyle={styles.disabledTitleStyle}
+      {...props}
+    />
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  titleStyle: {
+    fontSize: 20,
+    lineHeight: 24,
+    fontFamily: fonts.bold,
+    color: colors.textOnAccent,
+  },
+  disabledTitleStyle: {
+    color: colors.textOnAccentDisabled,
+  },
+  buttonStyle: {
+    minHeight: 50,
+    backgroundColor: colors.accent,
+  },
+  // Solid, not a translucent accent: a half-opacity accent left the label
+  // unreadable in both modes (brand v1.0 review, 2026-11-25).
+  disabledStyle: {
+    backgroundColor: colors.surfaceInteractive,
+  },
+}))

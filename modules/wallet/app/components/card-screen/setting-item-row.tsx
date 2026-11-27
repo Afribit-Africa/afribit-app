@@ -1,0 +1,125 @@
+import React, { useState } from "react"
+import { Pressable, StyleProp, TextStyle, View, ViewStyle } from "react-native"
+import { makeStyles, Text, useTheme } from "@rn-vui/themed"
+
+import { radius } from "@app/rne-theme/radius"
+import { GaloyIcon, IconNamesType } from "@app/components/atomic/galoy-icon"
+import { fonts } from "@app/rne-theme/fonts"
+
+const ICON_SIZE = 16
+
+type StyleProps = {
+  hovering: boolean
+  hasSubtitle: boolean
+}
+
+type SettingItemRowProps = {
+  title: string
+  subtitle?: string
+  leftIcon?: IconNamesType
+  leftIconColor?: string
+  leftIconSize?: number
+  /** Drops the standalone-card surface when the row sits inside a grouped list. */
+  containerStyle?: StyleProp<ViewStyle>
+  titleStyle?: StyleProp<TextStyle>
+  subtitleStyle?: StyleProp<TextStyle>
+  rightIcon?: IconNamesType | null
+  rightIconColor?: string
+  onPress?: () => void
+}
+
+export const SettingItemRow: React.FC<SettingItemRowProps> = ({
+  title,
+  subtitle,
+  leftIcon,
+  leftIconColor,
+  leftIconSize = ICON_SIZE,
+  containerStyle,
+  titleStyle,
+  subtitleStyle,
+  rightIcon = "caret-right",
+  rightIconColor,
+  onPress,
+}) => {
+  const [hovering, setHovering] = useState(false)
+  const hasSubtitle = Boolean(subtitle)
+  const styles = useStyles({ hovering, hasSubtitle })
+  const {
+    theme: { colors },
+  } = useTheme()
+
+  const iconColor = leftIconColor ?? colors.textOnBackground
+
+  const renderLeftIcon = () => {
+    if (leftIcon) {
+      return <GaloyIcon name={leftIcon} size={leftIconSize} color={iconColor} />
+    }
+    return null
+  }
+
+  const content = (
+    <>
+      {renderLeftIcon()}
+      <View style={styles.textContainer}>
+        <Text style={[styles.title, titleStyle]}>{title}</Text>
+        {subtitle && <Text style={[styles.subtitle, subtitleStyle]}>{subtitle}</Text>}
+      </View>
+      {rightIcon && (
+        <GaloyIcon
+          name={rightIcon}
+          size={ICON_SIZE}
+          color={rightIconColor ?? colors.accent}
+        />
+      )}
+    </>
+  )
+
+  if (onPress) {
+    return (
+      <Pressable
+        style={[styles.container, containerStyle]}
+        onPress={onPress}
+        onPressIn={() => setHovering(true)}
+        onPressOut={() => setHovering(false)}
+        accessibilityRole="button"
+        accessibilityLabel={subtitle ? `${title}, ${subtitle}` : title}
+      >
+        {content}
+      </Pressable>
+    )
+  }
+
+  return <View style={[styles.container, containerStyle]}>{content}</View>
+}
+
+const useStyles = makeStyles(({ colors }, { hovering, hasSubtitle }: StyleProps) => {
+  const baseBackground = hasSubtitle ? colors.surfaceInteractive : colors.transparent
+
+  return {
+    container: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: hovering ? colors.neutral : baseBackground,
+      borderRadius: hasSubtitle ? radius.default : 0,
+      paddingVertical: 14,
+      paddingLeft: 14,
+      paddingRight: 10,
+      gap: 14,
+    },
+    textContainer: {
+      flex: 1,
+    },
+    title: {
+      color: colors.textOnBackground,
+      fontFamily: fonts.regular,
+      fontSize: 14,
+      lineHeight: 20,
+    },
+    subtitle: {
+      color: colors.textMuted,
+      fontFamily: fonts.regular,
+      fontSize: 14,
+      lineHeight: 20,
+    },
+  }
+})

@@ -1,0 +1,129 @@
+import * as React from "react"
+import { useEffect } from "react"
+import { View } from "react-native"
+
+import { RouteProp, useNavigation, useRoute } from "@react-navigation/native"
+import { NativeStackNavigationProp } from "@react-navigation/native-stack"
+import { makeStyles } from "@rn-vui/themed"
+
+import { useApolloClient } from "@apollo/client"
+import { useIsAuthed } from "@app/graphql/is-authed-context"
+import { MFA_REQUIRED } from "@app/config/mfa"
+import { REQUIRED_SET_PIN_ROUTE } from "@app/navigation/required-pin"
+import {
+  readStoredWalletPresence,
+  StoredWalletPresence,
+} from "@app/self-custodial/storage/account-index"
+import { updateDeviceSessionCount } from "@app/graphql/client-only-query"
+
+import { useUnlockScreen } from "./unlock-screen"
+
+import { AfribitLogo } from "../../components/afribit-logo"
+import { Screen } from "../../components/screen"
+import type { RootStackParamList } from "../../navigation/stack-param-lists"
+import BiometricWrapper from "../../utils/biometricAuthentication"
+import { AuthenticationScreenPurpose, PinScreenPurpose } from "../../utils/enum"
+import KeyStoreWrapper from "../../utils/storage/secureStorage"
+
+export const AuthenticationCheckScreen: React.FC = () => {
+  const client = useApolloClient()
+  const styles = useStyles()
+
+  const navigation =
+    useNavigation<NativeStackNavigationProp<RootStackParamList, "authenticationCheck">>()
+  const route = useRoute<RouteProp<RootStackParamList, "authenticationCheck">>()
+  const isAuthed = useIsAuthed()
+
+  const isResume = route.params?.isResume ?? false
+  const { completeUnlock } = useUnlockScreen({ isResume })
+
+  useEffect(() => {
+    ;(async () => {
+      /** Fails closed, like the resume gate: a read that could not answer is
+       *  treated as enabled, so a storage fault sends the user to a lock they
+       *  can pass rather than past a lock they cannot see. */
+      const pinRead = await KeyStoreWrapper.readIsPinEnabled()
+      const isPinEnabled = pinRead.status !== "no"
+      const biometricsRead = await KeyStoreWrapper.readIsBiometricsEnabled()
+      const isBiometricsEnabled = biometricsRead.status !== "no"
+
+      /**
+       * A lock we inferred rather than read is not one we can promise the user
+       * can pass: the PIN screen would compare against a secret it also cannot
+       * read. The authentication screen still routes to the PIN and always shows
+       * a way out: a logout that takes the lock with it on a device that stores
+       * no wallet, and removing the wallets on one that does, where a logout
+       * would keep the lock and come straight back here.
+       */
+      const isLockUncertain =
+        pinRead.status === "failed" || biometricsRead.status === "failed"
+
+      const isBiometricPromptUsable =
+        (await BiometricWrapper.isSensorAvailable()) && isBiometricsEnabled
+
+      if (isBiometricPromptUsable || isLockUncertain) {
+        navigation.replace("authentication", {
+          screenPurpose: AuthenticationScreenPurpose.Authenticate,
+          isPinEnabled,
+          isResume,
+        })
+      } else if (isPinEnabled) {
+        navigation.replace("pin", {
+          screenPurpose: PinScreenPurpose.AuthenticatePin,
+          isResume,
+        })
+      } else if (
+        !isResume &&
+        MFA_REQUIRED &&
+        (await readStoredWalletPresence()) === StoredWalletPresence.Present
+      ) {
+        /** A wallet on the device with no PIN in front of it, from before the PIN was
+         *  compulsory (W-D11). The lock stays up until the PIN is set: the required
+         *  SetPin screen finishes the unlock itself, so nothing parked behind the lock
+         *  is released past it. */
+        navigation.replace(REQUIRED_SET_PIN_ROUTE.name, REQUIRED_SET_PIN_ROUTE.params)
+      } else {
+        /** Only a cold start opens a device session, and only one with an account to show
+         *  owes the user the home screen: without one it lands on the landing screen, and
+         *  a resume whose lock was turned off meanwhile just steps back. */
+        completeUnlock((coldStartRoute) => {
+          const isOpeningHome = coldStartRoute === "Primary"
+          if (isOpeningHome) updateDeviceSessionCount(client)
+          navigation.replace(coldStartRoute)
+        })
+      }
+    })()
+  }, [isAuthed, navigation, completeUnlock, client, isResume])
+
+  return (
+    <Screen>
+      <View style={styles.container}>
+        <View style={styles.logoWrapper}>
+          <View style={styles.logoContainer}>
+            <AfribitLogo size={288} />
+          </View>
+        </View>
+      </View>
+    </Screen>
+  )
+}
+
+const useStyles = makeStyles(() => ({
+  container: {
+    flex: 1,
+  },
+  logoWrapper: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  logoContainer: {
+    width: 288,
+    height: 288,
+  },
+}))

@@ -1,0 +1,87 @@
+import { useState } from "react"
+
+import {
+  SetUsernameError,
+  validateUsername,
+} from "@app/components/set-lightning-address-modal/username-validation"
+import { useInFlightGuard } from "@app/hooks/use-in-flight-guard"
+import {
+  checkLightningAddressAvailable,
+  registerLightningAddress,
+} from "@app/self-custodial/bridge"
+import { BackupStatus, useBackupState } from "@app/self-custodial/providers/backup-state"
+import { measure, ScEvent } from "@app/self-custodial/measurement"
+import { useSelfCustodialWallet } from "@app/self-custodial/providers/wallet"
+import { classifySdkError, SelfCustodialErrorCode } from "@app/self-custodial/sdk-error"
+
+type UseRegisterLightningAddress = {
+  lnAddress: string
+  error?: SetUsernameError
+  loading: boolean
+  setLnAddress: (value: string) => void
+  register: () => Promise<void>
+}
+
+export const useRegisterLightningAddress = (
+  onRegistered: () => void,
+): UseRegisterLightningAddress => {
+  const { sdk, updateCurrentSelfCustodialAccount } = useSelfCustodialWallet()
+  const { backupState } = useBackupState()
+  const guard = useInFlightGuard()
+  const [lnAddress, setLnAddressValue] = useState("")
+  const [error, setError] = useState<SetUsernameError | undefined>()
+  const [loading, setLoading] = useState(false)
+
+  const setLnAddress = (value: string) => {
+    setLnAddressValue(value)
+    setError(undefined)
+  }
+
+  const register = async () => {
+    await guard.run(async () => {
+      if (backupState.status !== BackupStatus.Completed) {
+        setError(SetUsernameError.BACKUP_REQUIRED)
+        return
+      }
+      const validation = validateUsername(lnAddress)
+      if (!validation.valid) {
+        setError(validation.error)
+        return
+      }
+      if (!sdk) {
+        setError(SetUsernameError.UNKNOWN_ERROR)
+        return
+      }
+
+      setLoading(true)
+      try {
+        const available = await checkLightningAddressAvailable(sdk, lnAddress)
+        if (!available) {
+          setError(SetUsernameError.ADDRESS_UNAVAILABLE)
+          return
+        }
+        await registerLightningAddress(sdk, lnAddress)
+        measure(ScEvent.LightningAddressRegistered)
+        await updateCurrentSelfCustodialAccount()
+        onRegistered()
+      } catch (err) {
+        /**
+         * A server that did not answer is not a name that is taken, and not an unknown
+         * fault either, so it gets its own message. That message says only to retry,
+         * not that the name is still free: the failure may have come before the
+         * availability check, or after the server took the registration and before
+         * its answer arrived, and in neither case is that known.
+         */
+        setError(
+          classifySdkError(err) === SelfCustodialErrorCode.NetworkError
+            ? SetUsernameError.SERVER_UNREACHABLE
+            : SetUsernameError.UNKNOWN_ERROR,
+        )
+      } finally {
+        setLoading(false)
+      }
+    })
+  }
+
+  return { lnAddress, error, loading, setLnAddress, register }
+}

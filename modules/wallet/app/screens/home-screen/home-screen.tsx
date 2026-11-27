@@ -1,0 +1,1173 @@
+import * as React from "react"
+import { useCallback, useMemo } from "react"
+import { RefreshControl, View, Alert, Pressable } from "react-native"
+import { gql } from "@apollo/client"
+import Modal from "react-native-modal"
+import { useNavigation, useIsFocused, useFocusEffect } from "@react-navigation/native"
+import { NativeStackNavigationProp } from "@react-navigation/native-stack"
+import { Text, makeStyles, useTheme } from "@rn-vui/themed"
+import { ScrollView, TouchableWithoutFeedback } from "react-native-gesture-handler"
+
+import { radius } from "@app/rne-theme/radius"
+import { AppUpdate } from "@app/components/app-update/app-update"
+import { GaloyErrorBox } from "@app/components/atomic/galoy-error-box"
+import { GaloyIcon, icons } from "@app/components/atomic/galoy-icon"
+import { GaloyIconButton } from "@app/components/atomic/galoy-icon-button"
+import { GaloyPrimaryButton } from "@app/components/atomic/galoy-primary-button"
+import { DisabledFeature } from "@app/components/disabled-feature"
+import {
+  HEADER_ICON_BUTTON_TOUCH_PADDING,
+  HEADER_ICON_TOUCH_SIZE,
+  headerIconButtonTouchPaddingAbove,
+} from "@app/components/header-no-glass"
+import { BulletinsCard } from "@app/components/notifications/bulletins"
+import { SetDefaultAccountModal } from "@app/components/set-default-account-modal"
+import { StableSatsModal } from "@app/components/stablesats-modal"
+import { DollarBalanceRestrictionModal } from "@app/components/dollar-balance-restriction-modal"
+import { UsdConvertToBtcModal } from "@app/components/usd-convert-to-btc-modal"
+import WalletOverview from "@app/components/wallet-overview/wallet-overview"
+import {
+  BalanceHeader,
+  usePendingReceiveAmount,
+  useTotalBalance,
+} from "@app/components/balance-header"
+import { BalanceMode, useBalanceMode } from "@app/hooks/use-balance-mode"
+import { useDisplayCurrency } from "@app/hooks/use-display-currency"
+import { usePriceConversion } from "@app/hooks/use-price-conversion"
+import { toBtcMoneyAmount, toUsdMoneyAmount } from "@app/types/amounts"
+import { StableTokenConvertToBtcModal } from "@app/screens/conversion-flow/stable-token-convert-to-btc-modal"
+import { TrialAccountLimitsModal } from "@app/components/upgrade-account-modal"
+import SlideUpHandle from "@app/components/slide-up-handle"
+import { Screen } from "@app/components/screen"
+import {
+  UnseenTxAmountBadge,
+  useUnseenTxBadgeState,
+} from "@app/components/unseen-tx-amount-badge"
+import { useBadgeSlotContent } from "@app/components/amount-badge"
+import { PendingAmountBadge } from "@app/components/pending-amount-badge"
+
+import { RootStackParamList } from "@app/navigation/stack-param-lists"
+import { useFeatureFlags, useRemoteConfig } from "@app/config/feature-flags-context"
+import { BackupNudgeBanner } from "@app/components/backup-nudge-banner"
+import { SelfCustodialInfoBulletin } from "@app/components/self-custodial-info-bulletin"
+import { TwoFactorNudgeCard } from "@app/custodial/components/two-factor-nudge-card"
+import { TwoFactorReminderBulletin } from "@app/custodial/components/two-factor-reminder-bulletin"
+import { TwoFactorSessionModal } from "@app/custodial/components/two-factor-session-modal"
+import { BackupNudgeModal } from "@app/components/backup-nudge-modal"
+import { NetworkStatusBanner } from "@app/components/network-status-banner"
+import { useHideAmount } from "@app/graphql/hide-amount-context"
+import { useIsAuthed } from "@app/graphql/is-authed-context"
+import { useActiveWallet } from "@app/hooks/use-active-wallet"
+import { useAccountRegistry } from "@app/hooks/use-account-registry"
+import { staticSurface } from "@app/rne-theme/surfaces"
+import { useDefaultAccountModalShown } from "@app/hooks/use-default-account-modal-shown"
+import {
+  useDollarBalanceGate,
+  useDollarBalanceRestriction,
+} from "@app/hooks/use-dollar-balance-restricted"
+import { useCustodialRestrictions } from "@app/custodial/providers/restrictions"
+import { useDollarBalanceForcedConversion } from "@app/hooks/use-dollar-balance-forced-conversion"
+import { useEnhancedModePrompt } from "@app/components/enhanced-mode-prompt"
+import { useRestrictedRegion } from "@app/components/restricted-region"
+import { useSelfCustodialAccountMode } from "@app/self-custodial/hooks/use-self-custodial-account-mode"
+import { MigrateNowModal } from "@app/components/migrate-now-modal"
+import { MigrationReminderBulletin } from "@app/components/migration-reminder-bulletin"
+import { OffboardOnlyBulletin } from "@app/components/offboard-only-bulletin"
+/** Deep import on purpose: keeps the migration hooks barrel out of the home graph. */
+import { useWindDownHomeNudges } from "@app/screens/account-migration/hooks/use-wind-down-home-nudges"
+import { useTransferGate } from "@app/hooks/use-transfer-blocked"
+import { useSelfCustodialNetworkMismatchToast } from "@app/self-custodial/hooks/use-network-mismatch-toast"
+import {
+  useNonCustodialConversionLimits,
+  usePendingDeposits,
+} from "@app/self-custodial/hooks"
+import { useSelfCustodialWallet } from "@app/self-custodial/providers/wallet"
+import { ConvertDirection, DepositStatus } from "@app/types/payment"
+import { TwoFactorPrompt } from "@app/types/two-factor-enforcement"
+import { useBackupNudgeState } from "@app/self-custodial/hooks/use-backup-nudge-state"
+import { useSelfCustodialInfoBulletinState } from "@app/hooks/use-self-custodial-info-bulletin-state"
+import { StaleCloudBundleBulletin } from "@app/self-custodial/components/stale-cloud-bundle-bulletin"
+import { useStaleCloudBundleBulletin } from "@app/self-custodial/hooks/use-stale-cloud-bundle-bulletin"
+import { useTwoFactorEnforcement } from "@app/custodial/providers/two-factor-enforcement"
+import { useTwoFactorSessionPrompt } from "@app/screens/home-screen/hooks/use-two-factor-session-prompt"
+import { getErrorMessages } from "@app/graphql/utils"
+import { AccountBalance, getBtcWallet, getUsdWallet } from "@app/graphql/wallets-utils"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { UnclaimedDepositBanner } from "@app/components/unclaimed-deposit-banner"
+import { testProps } from "@app/utils/testProps"
+import { isIos } from "@app/utils/helper"
+import { extractLightningAddressUsername } from "@app/utils/pay-links"
+import { useAppConfig, useAutoShowUpgradeModal } from "@app/hooks"
+import {
+  AccountLevel,
+  useBulletinsQuery,
+  useHomeAuthedQuery,
+  useHomeUnauthedQuery,
+  useRealtimePriceQuery,
+  useSettingsScreenQuery,
+  WalletCurrency,
+} from "@app/graphql/generated"
+import { GateReason } from "@app/types/account"
+import { AccountType } from "@app/types/wallet"
+import { useLevel } from "@app/graphql/level-context"
+
+const TransactionCountToTriggerSetDefaultAccountModal = 1
+const UPGRADE_MODAL_INITIAL_DELAY_MS = 1500
+/** Floor for conversions without a pool minimum (custodial intraledger always,
+ *  self-custodial when the SDK reports none): any positive cent converts. */
+const ANY_POSITIVE_CENT_MINIMUM = 1
+/** The SlideUpHandle floats over the bottom 97pt of the scroll view (82pt touch
+ *  area anchored 15pt up); content needs at least that much bottom padding for
+ *  the last bulletin to be readable at max scroll. */
+const SCROLL_BOTTOM_CLEARANCE = 100
+
+gql`
+  query homeAuthed {
+    me {
+      id
+      language
+      username
+      phone
+      email {
+        address
+        verified
+      }
+
+      defaultAccount {
+        id
+        level
+        defaultWalletId
+        pendingIncomingTransactions {
+          ...Transaction
+        }
+        transactions(first: 20) {
+          ...TransactionList
+        }
+        wallets {
+          id
+          balance
+          walletCurrency
+        }
+      }
+    }
+  }
+
+  query homeUnauthed {
+    globals {
+      network
+    }
+
+    currencyList {
+      id
+      flag
+      name
+      symbol
+      fractionDigits
+    }
+  }
+
+  query Bulletins($first: Int!, $after: String) {
+    me {
+      id
+      unacknowledgedStatefulNotificationsWithBulletinEnabled(
+        first: $first
+        after: $after
+      ) {
+        pageInfo {
+          endCursor
+          hasNextPage
+          hasPreviousPage
+          startCursor
+        }
+        edges {
+          node {
+            id
+            title
+            body
+            createdAt
+            acknowledgedAt
+            bulletinEnabled
+            dismissible
+            icon
+            action {
+              ... on OpenDeepLinkAction {
+                deepLink
+                label
+              }
+              ... on OpenExternalLinkAction {
+                url
+                label
+              }
+            }
+          }
+          cursor
+        }
+      }
+    }
+  }
+`
+
+/**
+ * A page of bulletins rather than one: the home shows the newest bulletin the user cannot
+ * close next to the newest one they can, and one they cannot close must not be pushed off
+ * the page by the closable ones sent after it. Bulletins are few, so a small page holds
+ * them all; the card decides how many of them to show.
+ */
+const BULLETINS_PAGE_SIZE = 10
+
+// eslint-disable-next-line max-statements, max-lines-per-function -- HomeScreen orchestrates the entire home; splitting solely to meet the statement and line caps would fragment cohesive setup without improving readability
+export const HomeScreen: React.FC = () => {
+  const styles = useStyles()
+  const {
+    theme: { colors },
+  } = useTheme()
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>()
+  const { balanceLimitToTriggerUpgradeModal, upgradeModalCooldownDays } =
+    useRemoteConfig()
+
+  const { defaultAccountModalShown } = useDefaultAccountModalShown()
+  const [setDefaultAccountModalVisible, setSetDefaultAccountModalVisible] =
+    React.useState(false)
+  const reopenUpgradeModal = React.useRef(false)
+  const toggleSetDefaultAccountModal = () =>
+    setSetDefaultAccountModalVisible(!setDefaultAccountModalVisible)
+
+  const { isAtLeastLevelOne } = useLevel()
+
+  const isAuthed = useIsAuthed()
+  const activeWallet = useActiveWallet()
+  const { isSelfCustodial } = activeWallet
+  useSelfCustodialNetworkMismatchToast()
+  const {
+    refreshWallets: refreshSelfCustodialWallets,
+    isStableBalanceActive,
+    lightningAddress: selfCustodialLightningAddress,
+    allTransactions: selfCustodialAllTransactions,
+  } = useSelfCustodialWallet()
+  const { accounts, activeAccount } = useAccountRegistry()
+  const hasMultipleAccounts = accounts.length > 1
+  const { stableBalanceEnabled } = useFeatureFlags()
+  const { mode: balanceMode, toggleMode: toggleBalanceMode } = useBalanceMode()
+  const { shouldShowBanner, shouldShowModal, dismissBanner, dismissModal } =
+    useBackupNudgeState()
+  const {
+    shouldShow: shouldShowSelfCustodialInfoBulletin,
+    dismiss: dismissSelfCustodialInfoBulletin,
+  } = useSelfCustodialInfoBulletinState()
+  const {
+    shouldShow: shouldShowStaleCloudBundleBulletin,
+    dismiss: dismissStaleCloudBundleBulletin,
+  } = useStaleCloudBundleBulletin()
+  const {
+    shouldShowNudgeCard: shouldShowTwoFactorNudgeCard,
+    reminderBulletinReason: twoFactorReminderReason,
+    remainingDismissals: twoFactorRemainingDismissals,
+    isSessionStartPending: isTwoFactorStartPending,
+    registerDismissal: registerTwoFactorDismissal,
+  } = useTwoFactorEnforcement()
+  const { LL } = useI18nContext()
+  const {
+    appConfig: {
+      galoyInstance: { id: galoyInstanceId },
+    },
+  } = useAppConfig()
+
+  const isFocused = useIsFocused()
+
+  const {
+    data: dataAuthed,
+    loading: loadingAuthed,
+    error,
+    refetch: refetchAuthed,
+  } = useHomeAuthedQuery({
+    skip: !isAuthed || isSelfCustodial,
+    fetchPolicy: "network-only",
+    errorPolicy: "all",
+
+    // this enables offline mode use-case
+    nextFetchPolicy: "cache-and-network",
+  })
+
+  const { loading: loadingPrice, refetch: refetchRealtimePrice } = useRealtimePriceQuery({
+    skip: !isAuthed || isSelfCustodial,
+    fetchPolicy: "network-only",
+
+    // this enables offline mode use-case
+    nextFetchPolicy: "cache-and-network",
+  })
+
+  const {
+    refetch: refetchUnauthed,
+    loading: loadingUnauthed,
+    data: dataUnauthed,
+  } = useHomeUnauthedQuery({
+    skip: !isAuthed,
+    fetchPolicy: "network-only",
+
+    // this enables offline mode use-case
+    nextFetchPolicy: "cache-and-network",
+  })
+
+  // keep settings info cached and ignore network call if it's already cached
+  const { data: currentUser, loading: loadingSettings } = useSettingsScreenQuery({
+    skip: !isAuthed,
+    fetchPolicy: "cache-first",
+    // this enables offline mode use-case
+    nextFetchPolicy: "cache-and-network",
+  })
+
+  // load bulletins on home screen
+  const {
+    data: bulletins,
+    loading: bulletinsLoading,
+    refetch: refetchBulletins,
+  } = useBulletinsQuery({
+    skip: !isAuthed,
+    fetchPolicy: "cache-and-network",
+    variables: { first: BULLETINS_PAGE_SIZE },
+  })
+
+  // not loaded yet: no wallets while not ready (a loaded account keeps its balance
+  // when a refresh goes offline, and a ready empty account shows zero, not a skeleton)
+  const queryLoading = isSelfCustodial
+    ? !activeWallet.isReady && activeWallet.wallets.length === 0
+    : loadingAuthed || loadingPrice || loadingUnauthed || loadingSettings
+
+  const { username, phone } = currentUser?.me ?? {}
+  const selfCustodialFallbackTitle = hasMultipleAccounts ? LL.common.anonymousUser() : ""
+
+  const selfCustodialUsername = extractLightningAddressUsername(
+    selfCustodialLightningAddress,
+  )
+  const usernameTitle = isSelfCustodial
+    ? selfCustodialUsername ?? selfCustodialFallbackTitle
+    : username || phone || LL.common.walletUser()
+  const canSwitchAccount = isSelfCustodial ? hasMultipleAccounts : isAtLeastLevelOne
+
+  const wallets = isSelfCustodial
+    ? activeWallet.wallets.map((w) => ({
+        id: w.id,
+        balance: w.balance.amount,
+        walletCurrency: w.walletCurrency,
+      }))
+    : dataAuthed?.me?.defaultAccount?.wallets
+
+  const homeErrorMessage = error && getErrorMessages(error)
+
+  const accountBalances: AccountBalance[] = [...(wallets ?? [])]
+
+  const {
+    formattedBalance: defaultFormattedBalance,
+    satsBalance,
+    isLoading: balanceConversionLoading,
+  } = useTotalBalance(accountBalances)
+
+  const loading = queryLoading || balanceConversionLoading
+  const isTotalBalanceLoading = loading
+
+  const showStableBalanceToggle =
+    stableBalanceEnabled && isSelfCustodial && isStableBalanceActive
+
+  const { formatMoneyAmount } = useDisplayCurrency()
+  const { isSatsOnly } = usePriceConversion()
+
+  const isShowingSats = showStableBalanceToggle && balanceMode === BalanceMode.Btc
+
+  const formattedBalance = isShowingSats
+    ? formatMoneyAmount({ moneyAmount: toBtcMoneyAmount(satsBalance) })
+    : defaultFormattedBalance
+
+  const accountId = dataAuthed?.me?.defaultAccount?.id
+  const levelAccount = dataAuthed?.me?.defaultAccount?.level
+  const pendingIncomingTransactions =
+    dataAuthed?.me?.defaultAccount?.pendingIncomingTransactions
+  const transactionsEdges = dataAuthed?.me?.defaultAccount?.transactions?.edges
+
+  /** Fetched once here and shared with the UnclaimedDepositBanner below, so the
+   *  pending row and that banner can never disagree about the same deposits. */
+  const { deposits, refetch: refetchPendingDeposits } = usePendingDeposits()
+
+  /** Pending deposits stay visible under the balance until confirmed —
+   *  unlike the unseen-tx badge sharing that slot, which auto-dismisses
+   *  (blink-wip#937). */
+  const { pendingReceiveAmountText } = usePendingReceiveAmount({
+    pendingIncomingTransactions,
+    deposits,
+  })
+  /** The banner below only counts actionable deposits, so the pending row
+   *  carries the immature and claiming deposits' inspection path (txid /
+   *  mempool link) to the unclaimed-deposits screen. Custodial pending
+   *  receives have no such screen — their row stays inert. */
+  const hasImmatureDeposits = deposits.some(
+    ({ status }) =>
+      status === DepositStatus.Immature || status === DepositStatus.Claiming,
+  )
+  const openUnclaimedDeposits = React.useCallback(
+    () => navigation.navigate("unclaimedDepositsScreen"),
+    [navigation],
+  )
+  const openUnclaimedDepositsOnPress = hasImmatureDeposits
+    ? openUnclaimedDeposits
+    : undefined
+
+  const { canShowUpgradeModal, markShownUpgradeModal } = useAutoShowUpgradeModal({
+    cooldownDays: upgradeModalCooldownDays,
+    enabled: isAuthed && levelAccount === AccountLevel.Zero,
+  })
+
+  const {
+    hasUnseenBtcTx,
+    hasUnseenUsdTx,
+    unseenAmountText,
+    handleUnseenBadgePress,
+    showIncomingBadge,
+    showOutgoingBadge,
+    isOutgoing,
+    latestUnseenTxId,
+    transactionCount,
+  } = useUnseenTxBadgeState({
+    isSelfCustodial,
+    isFocused,
+    custodialAccountId: accountId,
+    selfCustodialTransactions: selfCustodialAllTransactions,
+    pendingIncomingTransactions,
+    transactionEdges: transactionsEdges,
+  })
+
+  /** Both amount badges live in the same slot under the balance: the unseen-tx
+   *  one takes it while it is on screen, the pending row holds it otherwise. */
+  const showUnseenBadge = isOutgoing
+    ? showOutgoingBadge
+    : showIncomingBadge && Boolean(unseenAmountText)
+
+  /** Hidden amounts hide this one too: the slot sits directly under the balance the
+   *  placeholder replaced, so showing the deposit here would spell out the very figure
+   *  the user just covered. */
+  const { hideAmount } = useHideAmount()
+  const hasPendingAmount = Boolean(pendingReceiveAmountText) && !loading && !hideAmount
+
+  const badgeSlotContent = useBadgeSlotContent({
+    showUnseenBadge,
+    unseenKey: latestUnseenTxId,
+    hasPendingAmount,
+  })
+
+  const [modalVisible, setModalVisible] = React.useState(false)
+  const [isStablesatModalVisible, setIsStablesatModalVisible] = React.useState(false)
+  const [isUpgradeModalVisible, setIsUpgradeModalVisible] = React.useState(false)
+  const [isRestrictionModalVisible, setIsRestrictionModalVisible] = React.useState(false)
+  /** Region-only: the forced-conversion escape must not fire in Anon Mode. */
+  const {
+    isRestricted: isDollarBalanceRestricted,
+    isRegionDetermined: isDollarBalanceRegionDetermined,
+  } = useDollarBalanceRestriction()
+  const {
+    isGated: isDollarBalanceGated,
+    isRegionPending,
+    reason: dollarBalanceGateReason,
+  } = useDollarBalanceGate()
+  const isDollarBalanceRegionUnknown =
+    dollarBalanceGateReason === GateReason.UnknownRegion
+  const { refetch: refetchCustodialRestrictions } = useCustodialRestrictions()
+  const { isAnonMode } = useSelfCustodialAccountMode()
+  const { promptEnhancedMode, isEnhancedModePromptVisible } = useEnhancedModePrompt()
+  const {
+    isRestrictedRegion,
+    isRestrictedRegionEvaluationPending,
+    presentRestrictedRegionModal,
+  } = useRestrictedRegion()
+
+  const { isGated: isTransferGated, isRegionPending: isTransferRegionPending } =
+    useTransferGate()
+
+  const restrictedUsdWallet = getUsdWallet(dataAuthed?.me?.defaultAccount?.wallets)
+  const restrictedBtcWallet = getBtcWallet(dataAuthed?.me?.defaultAccount?.wallets)
+  /** Balance and restriction policy must resolve for the SAME account type: right
+   *  after switching to self-custodial the SDK is still connecting (so
+   *  `isSelfCustodial` is false) while the restriction already applies the
+   *  self-custodial policy; reading the cached custodial balance in that window
+   *  would trigger the previous account's modal. */
+  const isCustodialAccount = activeWallet.accountType === AccountType.Custodial
+  const selfCustodialUsdWallet = activeWallet.wallets.find(
+    (w) => w.walletCurrency === WalletCurrency.Usd,
+  )
+  const custodialUsdWalletBalance = restrictedUsdWallet?.balance ?? 0
+  const selfCustodialUsdWalletBalance = selfCustodialUsdWallet?.balance.amount ?? 0
+  const restrictedUsdWalletBalance = isCustodialAccount
+    ? custodialUsdWalletBalance
+    : selfCustodialUsdWalletBalance
+  /** Memoized so the self-custodial quote does not refire on unrelated re-renders. */
+  const restrictedUsdMoneyAmount = useMemo(
+    () => toUsdMoneyAmount(restrictedUsdWalletBalance),
+    [restrictedUsdWalletBalance],
+  )
+
+  /** The limits fetch only runs when a forced conversion is actually on the
+   *  table (the hook skips entirely on an undefined direction), and gating on
+   *  focus re-runs it on each home visit, so one failed fetch cannot mute the
+   *  trigger for the whole session. Below the Breez pool minimum the trigger
+   *  stays closed: the bridge rejects below-minimum conversions, so the modal
+   *  would nag with a retry that can never succeed. */
+  const shouldCheckConversionMinimum =
+    !isCustodialAccount &&
+    isDollarBalanceRestricted &&
+    restrictedUsdWalletBalance > 0 &&
+    isFocused
+  const { limits: stableTokenConversionLimits } = useNonCustodialConversionLimits(
+    shouldCheckConversionMinimum ? ConvertDirection.UsdToBtc : undefined,
+  )
+  /** A fetched limits response without a minimum means "none": mirror the bridge
+   *  (`checkConversionMinimum`), which lets any positive amount through. */
+  const stableTokenConversionMinimum = stableTokenConversionLimits
+    ? stableTokenConversionLimits.minFromAmount ?? ANY_POSITIVE_CENT_MINIMUM
+    : null
+  const minimumConvertibleBalance = isCustodialAccount
+    ? ANY_POSITIVE_CENT_MINIMUM
+    : stableTokenConversionMinimum
+
+  /** The sanctions block outranks the forced conversion: a sanctioned session must not
+   *  auto-present the convert modal over the restriction surfaces. The conversion also
+   *  empties the user's dollar balance, so it waits for a region that actually decided the
+   *  restriction: an unanswered question may gate the balance but cannot justify that. */
+  const isForcedConversionEligible =
+    isDollarBalanceRestricted && isDollarBalanceRegionDetermined && !isRestrictedRegion
+  const { isConvertModalVisible, closeConvertModal } = useDollarBalanceForcedConversion({
+    accountId: activeAccount?.id,
+    isRestricted: isForcedConversionEligible,
+    usdWalletBalance: restrictedUsdWalletBalance,
+    minimumBalance: minimumConvertibleBalance,
+    isFocused,
+  })
+
+  /** Each account type renders its own convert modal; the guards keep them exclusive
+   *  locally instead of relying on the skipped custodial query staying empty. */
+  const custodialConvertWallets =
+    isCustodialAccount && restrictedUsdWallet && restrictedBtcWallet
+      ? { usdWalletId: restrictedUsdWallet.id, btcWalletId: restrictedBtcWallet.id }
+      : null
+  const shouldShowStableTokenConvertModal = isSelfCustodial && isConvertModalVisible
+
+  const { migrateNowPrompt, offboardBulletin, reminderBulletin, receiveBlocked } =
+    useWindDownHomeNudges()
+  const {
+    canReopen: canReopenMigrateNowPrompt,
+    dismissForSession: dismissMigrateNowPrompt,
+    reopen: reopenMigrateNowPrompt,
+  } = migrateNowPrompt
+  /** Dismissing first keeps the modal from floating over the pushed migration flow. */
+  const goToMigration = React.useCallback(() => {
+    dismissMigrateNowPrompt()
+    navigation.navigate("accountMigrationEntry")
+  }, [dismissMigrateNowPrompt, navigation])
+  /** The migrate-now push is the lowest-priority nudge: two native modals cannot
+   *  present at once on iOS, so it waits while any other home modal is up — or may
+   *  still arrive, which is what the pending region evaluation signals. */
+  const isAnotherHomeModalVisible =
+    isConvertModalVisible ||
+    isUpgradeModalVisible ||
+    isRestrictionModalVisible ||
+    isStablesatModalVisible ||
+    isEnhancedModePromptVisible ||
+    isRestrictedRegion ||
+    isRestrictedRegionEvaluationPending ||
+    modalVisible
+  /** The wind-down nudge outranks the two-factor session start: an account whose
+   *  custodial service is ending has one remedy that matters more than a second factor.
+   *  While the wind-down has not answered, the nudge may still turn out to be due, so
+   *  the session start waits for that answer too. */
+  const isTwoFactorPromptBlocked =
+    isAnotherHomeModalVisible || migrateNowPrompt.isVisible || migrateNowPrompt.isPending
+  const { isModalOpen: isTwoFactorModalOpen, promptTier: twoFactorPromptTier } =
+    useTwoFactorSessionPrompt({ isBlocked: isTwoFactorPromptBlocked })
+  /** The dismissal takes the session start, which is what brings the modal down. */
+  const dismissTwoFactorModal = useCallback(() => {
+    registerTwoFactorDismissal(twoFactorPromptTier, {
+      prompt: TwoFactorPrompt.SessionModal,
+    })
+  }, [registerTwoFactorDismissal, twoFactorPromptTier])
+  const isTwoFactorModalVisible = isTwoFactorModalOpen && isFocused
+  /** Only while the home is in front: a screen the two-factor prompt pushed must not
+   *  end up under this modal, and the modal comes back with the home. */
+  const shouldShowMigrateNowPrompt =
+    migrateNowPrompt.isVisible &&
+    !isAnotherHomeModalVisible &&
+    !isTwoFactorModalOpen &&
+    isFocused
+
+  const closeUpgradeModal = () => setIsUpgradeModalVisible(false)
+  const closeRestrictionModal = () => setIsRestrictionModalVisible(false)
+  /** Anon outranks the region explanation (its remedy is switching modes), and the
+   *  sanctions block outranks the compliance one (it is the stricter layer). The wind-down
+   *  nudge outranks the compliance modal in turn, even its unknown-region variant with a
+   *  retry remedy: an account whose custodial service is ending has one remedy that
+   *  matters more, both gated surfaces are entry points a user hunting for it will try,
+   *  and the row's label still carries the retry advice on its own. `canReopen` is exactly
+   *  "the migrate-now nudge can surface", so a region-gated account with no wind-down, or
+   *  one whose self-custodial stack is off, still gets the compliance explanation. */
+  const onGatedDollarTap = () => {
+    /** Nothing the user can do opens it, and the row's label already says why. */
+    if (dollarBalanceGateReason === GateReason.Network) return
+    if (isAnonMode) {
+      promptEnhancedMode()
+      return
+    }
+    if (isRestrictedRegion) {
+      presentRestrictedRegionModal()
+      return
+    }
+    if (canReopenMigrateNowPrompt) {
+      reopenMigrateNowPrompt()
+      return
+    }
+    setIsRestrictionModalVisible(true)
+  }
+  const openUpgradeModal = React.useCallback(() => {
+    setIsUpgradeModalVisible(true)
+  }, [])
+
+  /** Also waits on the pending verdict: a late restricted result would otherwise
+   *  mount the full-screen block over an already-presented modal. Posponing costs
+   *  nothing, since this callback is a dependency of the focus effect below and
+   *  the effect re-arms its timer once the evaluation settles. */
+  const triggerUpgradeModal = React.useCallback(() => {
+    if (isRestrictedRegion || isRestrictedRegionEvaluationPending) return
+    /** The two-factor prompt goes first: its session start stays pending until its
+     *  modal is resolved, and the two would otherwise present as two native modals.
+     *  Being a dependency of the focus effect below, this re-arms the timer once the
+     *  start is taken, so the upgrade prompt gets its turn afterwards. */
+    if (isTwoFactorStartPending) return
+    if (!accountId || levelAccount !== AccountLevel.Zero) return
+    if (!canShowUpgradeModal || satsBalance <= balanceLimitToTriggerUpgradeModal) return
+
+    openUpgradeModal()
+    markShownUpgradeModal()
+  }, [
+    isRestrictedRegion,
+    isRestrictedRegionEvaluationPending,
+    isTwoFactorStartPending,
+    accountId,
+    levelAccount,
+    canShowUpgradeModal,
+    satsBalance,
+    balanceLimitToTriggerUpgradeModal,
+    markShownUpgradeModal,
+    openUpgradeModal,
+  ])
+
+  const refetch = React.useCallback(async () => {
+    if (isSelfCustodial) {
+      // Both must land before the pull-to-refresh spinner retracts: the wallet
+      // snapshot feeds the balance, the deposit listing feeds the pending pill
+      // and the unclaimed-deposit banner.
+      await Promise.all([refreshSelfCustodialWallets(), refetchPendingDeposits()])
+      return
+    }
+
+    if (!isAuthed) return
+
+    /** Asked again but not awaited: the verdict feeds nothing the pull shows, so the
+     *  spinner has no reason to wait on it, and a stalled socket on this request (the
+     *  link has no timeout) must not pin the spinner the balances already released. */
+    refetchCustodialRestrictions().catch(() => undefined)
+
+    await Promise.all([
+      refetchRealtimePrice(),
+      refetchAuthed(),
+      refetchUnauthed(),
+      refetchBulletins(),
+    ])
+    // Triggers the upgrade trial account modal after refetch
+    triggerUpgradeModal()
+  }, [
+    isAuthed,
+    isSelfCustodial,
+    refreshSelfCustodialWallets,
+    refetchPendingDeposits,
+    refetchAuthed,
+    refetchBulletins,
+    refetchCustodialRestrictions,
+    refetchRealtimePrice,
+    refetchUnauthed,
+    triggerUpgradeModal,
+  ])
+
+  /** The refresh control reflects only user-initiated pulls: iOS renders a
+   *  programmatically-pinned UIRefreshControl as a frozen spinner, so binding
+   *  it to background query loading pinned a dead spinner on every mount (and
+   *  indefinitely while a self-custodial wallet connects). */
+  const [isPullRefreshing, setIsPullRefreshing] = React.useState(false)
+  const handlePullToRefresh = React.useCallback(async () => {
+    setIsPullRefreshing(true)
+    try {
+      await refetch()
+    } catch {
+      // A failed pull (e.g. offline) already surfaces through each query's
+      // error state; RefreshControl ignores the promise, so don't let the
+      // rejection escape as unhandled.
+    } finally {
+      setIsPullRefreshing(false)
+    }
+  }, [refetch])
+
+  const numberOfTxs = transactionCount
+
+  const onMenuClick = (target: Target) => {
+    if (!isSelfCustodial && !isAuthed) {
+      setModalVisible(true)
+      return
+    }
+
+    if (
+      !isSelfCustodial &&
+      !isDollarBalanceRestricted &&
+      target === "receiveBitcoin" &&
+      !defaultAccountModalShown &&
+      numberOfTxs >= TransactionCountToTriggerSetDefaultAccountModal &&
+      galoyInstanceId === "Main"
+    ) {
+      toggleSetDefaultAccountModal()
+      return
+    }
+
+    navigation.navigate(target)
+  }
+
+  const activateWallet = () => {
+    setModalVisible(false)
+    navigation.navigate("acceptTermsAndConditions", { flow: "phone" })
+  }
+
+  // debug code. verify that we have 2 wallets. mobile doesn't work well with only one wallet
+  // TODO: add this code in a better place
+  React.useEffect(() => {
+    if (isSelfCustodial) return
+    if (wallets?.length !== undefined && wallets?.length !== 2) {
+      Alert.alert(LL.HomeScreen.walletCountNotTwo())
+    }
+  }, [wallets, LL, isSelfCustodial])
+
+  // Trigger the upgrade trial account modal
+  useFocusEffect(
+    React.useCallback(() => {
+      if (reopenUpgradeModal.current) {
+        openUpgradeModal()
+        reopenUpgradeModal.current = false
+        return
+      }
+
+      const id = setTimeout(() => {
+        triggerUpgradeModal()
+      }, UPGRADE_MODAL_INITIAL_DELAY_MS)
+
+      return () => clearTimeout(id)
+    }, [openUpgradeModal, triggerUpgradeModal]),
+  )
+
+  type Target =
+    | "scanningQRCode"
+    | "sendBitcoinDestination"
+    | "receiveBitcoin"
+    | "conversionDetails"
+  type IconNamesType = keyof typeof icons
+
+  type HomeButton = {
+    title: string
+    target: Target
+    icon: IconNamesType
+    disabled?: boolean
+    onDisabledPress?: () => void
+  }
+
+  const buttons: HomeButton[] = [
+    {
+      title: LL.HomeScreen.receive(),
+      target: "receiveBitcoin",
+      icon: "receive",
+      disabled: receiveBlocked.isBlocked,
+      onDisabledPress: receiveBlocked.onDisabledPress,
+    },
+    {
+      title: LL.HomeScreen.send(),
+      target: "sendBitcoinDestination",
+      icon: "send",
+    },
+    {
+      title: LL.HomeScreen.scan(),
+      target: "scanningQRCode",
+      icon: "qr-code",
+    },
+  ]
+
+  const passesIosGate =
+    isSelfCustodial ||
+    !isIos ||
+    dataUnauthed?.globals?.network !== "mainnet" ||
+    levelAccount === AccountLevel.Two ||
+    levelAccount === AccountLevel.Three ||
+    (isIos && satsBalance > 0)
+
+  /** Disabled while the region resolves so a fast tap cannot reach the gated flow before
+   *  the verdict lands; the explanation waits, since it would be wrong for a user who
+   *  turns out to be ungated. A sanctioned region disables it outright. */
+  const isTransferDisabled = isDollarBalanceGated || isRestrictedRegion || isRegionPending
+  const onTransferDisabledPress = isRegionPending ? undefined : onGatedDollarTap
+
+  /** A gated transfer must not hide the button while something else already disables it:
+   *  the disabled button is the user's entry point to the explanation (WalletOverview
+   *  greys the row from the same hook). Only the iOS zero-balance gate may hide it in
+   *  that state.
+   *
+   *  Visibility still holds on the pending region, like every other gated surface here.
+   *  Reading an unresolved region as allowed would offer the button and then take it
+   *  away once the verdict lands, for a user whose transfers are region-gated but who is
+   *  otherwise ungated. Anon resolves no region, so nothing pends there. The hold costs a
+   *  frame: the settings query behind the country is cache-first and the phone parse is
+   *  synchronous. */
+  const shouldShowTransferButton =
+    passesIosGate && !isTransferRegionPending && (!isTransferGated || isTransferDisabled)
+
+  if (shouldShowTransferButton) {
+    buttons.unshift({
+      title: LL.ConversionDetailsScreen.transfer(),
+      target: "conversionDetails",
+      icon: "transfer",
+      disabled: isTransferDisabled,
+      onDisabledPress: onTransferDisabledPress,
+    })
+  }
+
+  const AccountCreationNeededModal = (
+    <Modal
+      style={styles.modal}
+      isVisible={modalVisible}
+      swipeDirection={modalVisible ? ["down"] : ["up"]}
+      onSwipeComplete={() => setModalVisible(false)}
+      animationOutTiming={1}
+      swipeThreshold={50}
+    >
+      <View style={styles.flex}>
+        <TouchableWithoutFeedback onPress={() => setModalVisible(false)}>
+          <View style={styles.cover} />
+        </TouchableWithoutFeedback>
+      </View>
+      <View style={styles.viewModal}>
+        <GaloyIcon
+          name="minus"
+          size={64}
+          color={colors.textDisabled}
+          style={styles.icon}
+        />
+        <Text type="h1">{LL.common.needWallet()}</Text>
+        <View style={styles.openWalletContainer}>
+          <GaloyPrimaryButton
+            title={LL.GetStartedScreen.logInCreateAccount()}
+            onPress={activateWallet}
+          />
+        </View>
+        <View style={styles.flex} />
+      </View>
+    </Modal>
+  )
+
+  const handleSwitchPress = () => {
+    navigation.navigate("profileScreen")
+  }
+
+  return (
+    <Screen headerShown={false} edges={["top", "left", "right"]}>
+      {AccountCreationNeededModal}
+      <StableSatsModal
+        isVisible={isStablesatModalVisible}
+        setIsVisible={setIsStablesatModalVisible}
+        variant={isSelfCustodial ? "selfCustodial" : "custodial"}
+      />
+      <TrialAccountLimitsModal
+        isVisible={isUpgradeModalVisible}
+        closeModal={closeUpgradeModal}
+        beforeSubmit={() => {
+          reopenUpgradeModal.current = true
+        }}
+      />
+      <DollarBalanceRestrictionModal
+        isVisible={isRestrictionModalVisible}
+        toggleModal={closeRestrictionModal}
+        isRegionUnknown={isDollarBalanceRegionUnknown}
+      />
+      {custodialConvertWallets && (
+        <UsdConvertToBtcModal
+          isVisible={isConvertModalVisible}
+          toggleModal={closeConvertModal}
+          usdWalletBalance={restrictedUsdMoneyAmount}
+          usdWalletId={custodialConvertWallets.usdWalletId}
+          btcWalletId={custodialConvertWallets.btcWalletId}
+        />
+      )}
+      {shouldShowStableTokenConvertModal && (
+        <StableTokenConvertToBtcModal
+          isVisible={isConvertModalVisible}
+          toggleModal={closeConvertModal}
+          usdWalletBalance={restrictedUsdMoneyAmount}
+          conversionMinimum={stableTokenConversionMinimum}
+        />
+      )}
+      {/* Kept mounted (not conditionally rendered) so its exit animation plays on dismiss. */}
+      <MigrateNowModal
+        isVisible={shouldShowMigrateNowPrompt}
+        toggleModal={migrateNowPrompt.dismissForSession}
+        onMigrate={goToMigration}
+        deadlineTimestamp={migrateNowPrompt.deadlineTimestamp}
+        timezone={migrateNowPrompt.timezone}
+      />
+      <View {...testProps("home-header")} style={styles.balanceContainer}>
+        <View {...testProps("home-header-row")} style={styles.header}>
+          <View style={styles.headerSideSpacer} />
+          <View style={styles.headerTitle}>
+            {!loading && usernameTitle && (
+              <Pressable onPress={canSwitchAccount ? handleSwitchPress : null}>
+                <View style={styles.profileContainer}>
+                  <Text {...testProps("home-username")} type="p2">
+                    {usernameTitle}
+                  </Text>
+                  {canSwitchAccount && <GaloyIcon name={"caret-down"} size={18} />}
+                </View>
+              </Pressable>
+            )}
+          </View>
+          <GaloyIconButton
+            {...testProps("home-settings-button")}
+            onPress={() => navigation.navigate("settings")}
+            size={"medium"}
+            name="menu"
+            iconOnly={true}
+            weight="bold"
+            touchPadding={headerIconButtonTouchPaddingAbove}
+          />
+        </View>
+      </View>
+      <BalanceHeader
+        loading={isTotalBalanceLoading}
+        formattedBalance={formattedBalance}
+        showStableBalanceToggle={showStableBalanceToggle}
+        mode={balanceMode}
+        onModeChange={toggleBalanceMode}
+        isSatsOnly={isSatsOnly}
+      />
+      <View style={styles.badgeSlot}>
+        {badgeSlotContent === "unseen" ? (
+          <UnseenTxAmountBadge
+            key={latestUnseenTxId}
+            amountText={unseenAmountText ?? ""}
+            visible={showUnseenBadge}
+            onPress={handleUnseenBadgePress}
+            isOutgoing={isOutgoing}
+          />
+        ) : badgeSlotContent === "pending" && pendingReceiveAmountText ? (
+          <PendingAmountBadge
+            amountText={`+${pendingReceiveAmountText}`}
+            onPress={openUnclaimedDepositsOnPress}
+            accessibilityLabel={LL.HomeScreen.pendingReceiveBadge({
+              amount: pendingReceiveAmountText,
+            })}
+          />
+        ) : null}
+      </View>
+      <ScrollView
+        {...testProps("home-screen")}
+        contentContainerStyle={styles.scrollViewContainer}
+        refreshControl={
+          <RefreshControl
+            refreshing={isPullRefreshing}
+            onRefresh={handlePullToRefresh}
+            colors={[colors.accent]}
+            tintColor={colors.accent}
+          />
+        }
+      >
+        <WalletOverview
+          loading={loading}
+          setIsStablesatModalVisible={setIsStablesatModalVisible}
+          onGatedTap={onGatedDollarTap}
+          accounts={accountBalances}
+          showBtcNotification={isOutgoing ? false : hasUnseenBtcTx}
+          showUsdNotification={isOutgoing ? false : hasUnseenUsdTx}
+        />
+        {homeErrorMessage && <GaloyErrorBox errorMessage={homeErrorMessage} />}
+        <View style={styles.listItemsContainer}>
+          {buttons.map((item) => (
+            <React.Fragment key={item.icon}>
+              {item.icon === "qr-code" && <View style={styles.actionsSeparator} />}
+              <View style={styles.button}>
+                <DisabledFeature
+                  disabled={Boolean(item.disabled)}
+                  onDisabledPress={item.onDisabledPress}
+                  accessibilityLabel={item.title}
+                >
+                  <GaloyIconButton
+                    name={item.icon}
+                    size="large"
+                    weight="regular"
+                    text={item.title}
+                    onPress={() => onMenuClick(item.target)}
+                  />
+                </DisabledFeature>
+              </View>
+            </React.Fragment>
+          ))}
+        </View>
+        {isSelfCustodial && <UnclaimedDepositBanner deposits={deposits} />}
+        <NetworkStatusBanner />
+        {shouldShowBanner && <BackupNudgeBanner onDismiss={dismissBanner} />}
+        {shouldShowTwoFactorNudgeCard && <TwoFactorNudgeCard />}
+        {twoFactorReminderReason && (
+          <TwoFactorReminderBulletin reason={twoFactorReminderReason} />
+        )}
+        {offboardBulletin.isVisible && <OffboardOnlyBulletin />}
+        {reminderBulletin.isVisible && (
+          <MigrationReminderBulletin
+            onMigrate={goToMigration}
+            phase={reminderBulletin.phase}
+            deadlineTimestamp={reminderBulletin.deadlineTimestamp}
+            receiveDisabledTimestamp={reminderBulletin.receiveDisabledTimestamp}
+            timezone={reminderBulletin.timezone}
+          />
+        )}
+        {shouldShowSelfCustodialInfoBulletin && (
+          <SelfCustodialInfoBulletin onDismiss={dismissSelfCustodialInfoBulletin} />
+        )}
+        {shouldShowStaleCloudBundleBulletin && (
+          <StaleCloudBundleBulletin onDismiss={dismissStaleCloudBundleBulletin} />
+        )}
+        <BulletinsCard loading={bulletinsLoading} bulletins={bulletins} />
+        <AppUpdate />
+        <SetDefaultAccountModal
+          isVisible={setDefaultAccountModalVisible}
+          toggleModal={() => {
+            toggleSetDefaultAccountModal()
+            navigation.navigate("receiveBitcoin")
+          }}
+        />
+      </ScrollView>
+      <SlideUpHandle
+        bottomOffset={15}
+        onAction={() => navigation.navigate("transactionHistory")}
+      />
+      <BackupNudgeModal isVisible={shouldShowModal && isFocused} onClose={dismissModal} />
+      <TwoFactorSessionModal
+        isVisible={isTwoFactorModalVisible}
+        remainingDismissals={twoFactorRemainingDismissals}
+        onDismiss={dismissTwoFactorModal}
+      />
+    </Screen>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  scrollViewContainer: {
+    paddingHorizontal: 20,
+    paddingBottom: SCROLL_BOTTOM_CLEARANCE,
+    rowGap: 20,
+  },
+  listItemsContainer: {
+    paddingHorizontal: 15,
+    paddingVertical: 15,
+    borderRadius: radius.default,
+    // The band itself isn't a press target; only the icon buttons on it are.
+    ...staticSurface(colors),
+    display: "flex",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    columnGap: 12,
+  },
+  noTransaction: {
+    alignItems: "center",
+  },
+  icon: {
+    height: 34,
+    top: -22,
+  },
+  modal: {
+    marginBottom: 0,
+    marginHorizontal: 0,
+  },
+  flex: {
+    flex: 1,
+  },
+  cover: {
+    height: "100%",
+    width: "100%",
+  },
+  viewModal: {
+    alignItems: "center",
+    backgroundColor: colors.backgroundDefault,
+    height: "30%",
+    justifyContent: "flex-end",
+    paddingHorizontal: 20,
+  },
+  openWalletContainer: {
+    alignSelf: "stretch",
+    marginTop: 20,
+  },
+  recentTransaction: {
+    display: "flex",
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    columnGap: 10,
+    backgroundColor: colors.surfaceInteractive,
+    borderTopLeftRadius: radius.default,
+    borderTopRightRadius: radius.default,
+    borderColor: colors.surfaceInteractive,
+    borderBottomWidth: 2,
+    paddingVertical: 14,
+  },
+  button: {
+    maxWidth: "25%",
+    flexGrow: 1,
+    alignItems: "center",
+  },
+  // The price and menu touch boxes grow 7dp up and sideways into the row's margins (no
+  // room is free below them). The icons stay 13dp down (6 + 0 + 7) and the balance at 47dp.
+  balanceContainer: {
+    marginTop: 6,
+    flexDirection: "column",
+    minHeight: 40,
+  },
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginHorizontal: 20 - HEADER_ICON_BUTTON_TOUCH_PADDING,
+    marginTop: 0,
+  },
+  // Holds the left slot open so the username stays centred between the edges.
+  headerSideSpacer: {
+    width: HEADER_ICON_TOUCH_SIZE,
+  },
+  // Matches the padding above the icons, so the username stays centred on them.
+  headerTitle: {
+    paddingTop: HEADER_ICON_BUTTON_TOUCH_PADDING,
+  },
+  error: {
+    alignSelf: "center",
+    color: colors.error,
+  },
+  profileContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  actionsSeparator: {
+    width: 1,
+    alignSelf: "stretch",
+    backgroundColor: colors.neutral,
+  },
+  badgeSlot: {
+    // minHeight, not height: at 20pt x the 1.4 font cap the badge's line box
+    // overruns 35pt, and a fixed height clips it (#4120).
+    minHeight: 35,
+    marginVertical: 3,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+}))

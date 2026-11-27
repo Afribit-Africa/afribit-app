@@ -1,0 +1,308 @@
+import fs from "fs"
+import path from "path"
+
+import { it } from "@jest/globals"
+
+import en from "@app/i18n/en"
+
+const TRANSLATIONS_DIR = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "app",
+  "i18n",
+  "raw-i18n",
+  "translations",
+)
+
+type AnyTranslation = Record<string, unknown>
+
+const collectLeafPaths = (node: unknown, prefix = ""): string[] => {
+  if (node === null || typeof node !== "object") return [prefix]
+  const obj = node as AnyTranslation
+  return Object.keys(obj)
+    .sort()
+    .flatMap((key) => collectLeafPaths(obj[key], prefix ? `${prefix}.${key}` : key))
+}
+
+const collectLeaves = (
+  node: unknown,
+  prefix = "",
+  out: Record<string, unknown> = {},
+): Record<string, unknown> => {
+  if (node === null || typeof node !== "object") {
+    out[prefix] = node
+    return out
+  }
+  const obj = node as AnyTranslation
+  for (const key of Object.keys(obj)) {
+    collectLeaves(obj[key], prefix ? `${prefix}.${key}` : key, out)
+  }
+  return out
+}
+
+/**
+ * typesafe-i18n placeholders carry an optional type and formatter chain —
+ * `{amount}`, `{limit: string}`, `{count:number|sats}`. Only the argument name
+ * has to survive translation, so compare on that alone.
+ */
+const placeholderNames = (value: unknown): string[] =>
+  typeof value === "string"
+    ? [...value.matchAll(/\{([^}]*)\}/g)]
+        .map((match) => match[1].split(/[:|]/)[0].trim())
+        .sort()
+    : []
+
+/**
+ * Placeholder drift that predates this check. These locales render a literal
+ * "{amount}" to users, or silently drop an interpolated value — real bugs, but
+ * translation fixes rather than code ones, so they are recorded here instead of
+ * blocking the suite. The list is a ratchet: it may shrink, never grow. Delete
+ * an entry as soon as the locale is corrected.
+ */
+const KNOWN_PLACEHOLDER_DRIFT = new Set([
+  "af.json:SendBitcoinDestinationScreen.usernameNowAddressInfo",
+  "af.json:TransactionDetailScreen.txNotBroadcast",
+  "ar.json:TransactionDetailScreen.txNotBroadcast",
+  "ca.json:PhoneLoginValidationScreen.sendViaOtherChannel",
+  "cs.json:TransactionDetailScreen.txNotBroadcast",
+  "el.json:ReceiveScreen.invoiceValidity.validBefore",
+  "es.json:SendBitcoinDestinationScreen.usernameNowAddressInfo",
+  "fr.json:TransactionDetailScreen.txNotBroadcast",
+  "hr.json:SendBitcoinDestinationScreen.destinationOptions",
+  "hr.json:TransactionDetailScreen.txNotBroadcast",
+  "hy.json:TransactionDetailScreen.txNotBroadcast",
+  "id.json:ContactDetailsScreen.title",
+  "id.json:EarnScreen.earnSats",
+  "it.json:ReceiveScreen.invoiceValidity.expiresIn",
+  "ja.json:TransactionDetailScreen.txNotBroadcast",
+  "lg.json:support.defaultSupportMessage",
+  "ms.json:EarnScreen.satsEarned",
+  "ms.json:PhoneLoginValidationScreen.sendViaOtherChannel",
+  "ms.json:PinScreen.attemptsRemaining",
+  "ms.json:ReceiveScreen.invoiceValidity.expiresIn",
+  "ms.json:ReceiveScreen.invoiceValidity.validBefore",
+  "ms.json:ReceiveScreen.invoiceValidity.validForNext",
+  "ms.json:RedeemBitcoinScreen.minMaxRange",
+  "ms.json:RedeemBitcoinScreen.redeemAmountFrom",
+  "ms.json:ScanningQRCodeScreen.expiredContent",
+  "ms.json:ScanningQRCodeScreen.invalidContent",
+  "ms.json:ScanningQRCodeScreen.invalidContentLnurl",
+  "ms.json:SendBitcoinConfirmationScreen.stalePrice",
+  "ms.json:TransactionDetailScreen.txNotBroadcast",
+  "nl.json:TransactionDetailScreen.txNotBroadcast",
+  "pt.json:AmountInputScreen.minAmountNotMet",
+  "pt.json:ScanningQRCodeScreen.expiredContent",
+  "qu.json:TransactionDetailScreen.txNotBroadcast",
+  "ro.json:SendBitcoinConfirmationScreen.totalExceed",
+  "sr.json:TransactionDetailScreen.txNotBroadcast",
+  "th.json:TransactionDetailScreen.txNotBroadcast",
+  "tr.json:RedeemBitcoinScreen.redeemAmountFrom",
+  "vi.json:SendBitcoinDestinationScreen.destinationOptions",
+  "vi.json:TransactionDetailScreen.txNotBroadcast",
+  "xh.json:EarnScreen.earnSats",
+  "xh.json:ScanningQRCodeScreen.expiredContent",
+  "xh.json:ScanningQRCodeScreen.invalidContent",
+  "xh.json:ScanningQRCodeScreen.invalidContentLnurl",
+  "xh.json:SendBitcoinDestinationScreen.newBankAddressUsername",
+  "xh.json:SendBitcoinDestinationScreen.usernameNowAddress",
+  "xh.json:SettingsScreen.rateUs",
+  "xh.json:TransactionDetailScreen.txNotBroadcast",
+])
+
+/**
+ * English keys added ahead of the translation pass. Every locale is built as
+ * `merge({}, en, rawTranslated)` (see `app/i18n/es/index.ts`), so a key that is
+ * still only in the English source falls back to English rather than breaking.
+ * The translation pass fills the locale files and deletes the entry here. The
+ * list is a ratchet: it may shrink, never grow.
+ */
+const KNOWN_UNTRANSLATED_KEYS = new Set([
+  "common.walletUser",
+  "SecurityScreen.changePin",
+  "TwoFactorEnforcement.requiredBody",
+  "TwoFactorEnforcement.requiredTrialBody",
+  "TwoFactorEnforcement.addPhoneNumber",
+  "PinScreen.setPinRequired",
+  "SendBitcoinConfirmationScreen.authDescription",
+  "BackupScreen.CloudBackup.authDescription",
+  "BackupScreen.BundleExport.authDescription",
+])
+
+const withoutPendingTranslations = (keys: string[]): string[] =>
+  keys.filter((key) => !KNOWN_UNTRANSLATED_KEYS.has(key))
+
+const sourceLeafPaths = new Set(collectLeafPaths(en))
+const sourceLeaves = collectLeaves(en)
+
+const diffSets = (
+  source: Set<string>,
+  target: Set<string>,
+): { missing: string[]; extra: string[] } => {
+  const missing: string[] = []
+  const extra: string[] = []
+  for (const p of source) if (!target.has(p)) missing.push(p)
+  for (const p of target) if (!source.has(p)) extra.push(p)
+  return { missing, extra }
+}
+
+const placeholderDrift = (localeFile: string, parsed: AnyTranslation): string[] => {
+  const localeLeaves = collectLeaves(parsed)
+  const hasDrifted = (key: string): boolean =>
+    key in localeLeaves &&
+    !KNOWN_PLACEHOLDER_DRIFT.has(`${localeFile}:${key}`) &&
+    placeholderNames(sourceLeaves[key]).join(",") !==
+      placeholderNames(localeLeaves[key]).join(",")
+
+  return Object.keys(sourceLeaves).filter(hasDrifted)
+}
+
+/**
+ * Slovak and Czech name the account types with the English "custodial" and
+ * "non-custodial". Their earlier translations ran to six variants per locale
+ * (zverenský, svěřenský, kustodiálny, úschovný, vlastná správa, Spravovaný…),
+ * often on the same screen, so any of them coming back is a regression.
+ *
+ * `\p{L}` rather than `\w`: JavaScript `\w` is ASCII, so "Vlastná správa" and
+ * "s vlastní správou" never matched. `spravovan` stops before `i` so the noun
+ * "spravovanie" (management) is not treated as a custody term. A bare `zveren`
+ * is not used, because that also matches "zverejnenie" (publish).
+ */
+const TRANSLATED_CUSTODY_TERMS: Record<string, RegExp> = {
+  "sk.json":
+    /zverensk|zvereneck|sverensk|sverenec|kustodi|úschov|nesprávcov|vlastn\p{L}* správ|spravovan(?!i)|necustodial/iu,
+  "cs.json":
+    /svěřensk|svěřeneck|kustodi|úschov|vlastn\p{L}* správ|spravovan(?!i)|necustodial/iu,
+}
+
+const translatedCustodyTerms = (localeFile: string, parsed: AnyTranslation): string[] => {
+  const pattern = TRANSLATED_CUSTODY_TERMS[localeFile]
+  const localeLeaves = collectLeaves(parsed)
+  return Object.keys(localeLeaves).filter((key) => {
+    const value = localeLeaves[key]
+    return typeof value === "string" && pattern.test(value)
+  })
+}
+
+/**
+ * The picker and the settings account row are the names users see. Banning old
+ * stems does not keep these keys on "custodial" / "non-custodial".
+ */
+const ACCOUNT_TYPE_TERMS: Record<string, "custodial" | "non-custodial"> = {
+  "AccountTypeSelectionScreen.custodialLabel": "custodial",
+  "AccountTypeSelectionScreen.selfCustodialLabel": "non-custodial",
+  "SettingsScreen.custodialAccount": "custodial",
+  "SettingsScreen.nonCustodialAccount": "non-custodial",
+}
+
+const namesAccountType = (
+  value: unknown,
+  term: "custodial" | "non-custodial",
+): boolean => {
+  if (typeof value !== "string") return false
+  if (term === "non-custodial") return /non-custodial/i.test(value)
+  return /custodial/i.test(value.replace(/non-custodial/gi, ""))
+}
+
+const missingAccountTypeTerms = (parsed: AnyTranslation): string[] => {
+  const localeLeaves = collectLeaves(parsed)
+  return Object.entries(ACCOUNT_TYPE_TERMS)
+    .filter(([key, term]) => !namesAccountType(localeLeaves[key], term))
+    .map(([key]) => key)
+}
+
+/** Every historical form named in the glossary, including the accented labels. */
+const PROHIBITED_CUSTODY_FORMS: Array<[string, string]> = [
+  ["sk.json", "zverenský"],
+  ["sk.json", "zverenecký"],
+  ["sk.json", "kustodiálny"],
+  ["sk.json", "úschovný"],
+  ["sk.json", "Spravovaný"],
+  ["sk.json", "nesverenecký"],
+  ["sk.json", "nesprávcovský"],
+  ["sk.json", "nekustodiálny"],
+  ["sk.json", "vo vlastnej správe"],
+  ["sk.json", "Vlastná správa"],
+  ["sk.json", "necustodial"],
+  ["sk.json", "Vyberte režim s vlastnou správou"],
+  ["cs.json", "svěřenský"],
+  ["cs.json", "svěřenecký"],
+  ["cs.json", "kustodiální"],
+  ["cs.json", "úschovný"],
+  ["cs.json", "Spravovaný"],
+  ["cs.json", "nesvěřenský"],
+  ["cs.json", "nesvěřenecký"],
+  ["cs.json", "nekustodiální"],
+  ["cs.json", "ve vlastní správě"],
+  ["cs.json", "Vlastní správa"],
+  ["cs.json", "necustodial"],
+  ["cs.json", "Vyberte režim s vlastní správou"],
+  ["cs.json", "Přepnuto na režim Enhanced\ns vlastní správou"],
+  ["cs.json", "Přepnuto na režim Incognito\ns vlastní správou"],
+]
+
+const ALLOWED_NEAR_MATCHES = [
+  "spravovanie",
+  "zverejnenie",
+  "správca hesiel",
+  "non-custodial",
+  "Custodial účet",
+]
+
+const localeFiles = fs
+  .readdirSync(TRANSLATIONS_DIR)
+  .filter((name) => name.endsWith(".json"))
+  .sort()
+
+describe("locale parity", () => {
+  localeFiles.forEach((localeFile) => {
+    describe(localeFile, () => {
+      const filePath = path.join(TRANSLATIONS_DIR, localeFile)
+      const raw = fs.readFileSync(filePath, "utf8")
+      const parsed = JSON.parse(raw) as AnyTranslation
+      const localeLeafPaths = new Set(collectLeafPaths(parsed))
+
+      it("has the same set of leaf keys as the English source", () => {
+        const { missing, extra } = diffSets(sourceLeafPaths, localeLeafPaths)
+        expect({
+          // Keys awaiting the translation pass fall back to English at runtime.
+          missing: withoutPendingTranslations(missing),
+          extra,
+        }).toEqual({
+          missing: [],
+          extra: [],
+        })
+      })
+
+      // Key parity alone lets a locale keep the key and lose the value it
+      // interpolates: "USD {limit} per day" becomes a stale hardcoded amount, or
+      // the literal "{limit: string}" is shown to users. Both ship green without
+      // this.
+      it("interpolates the same placeholders as the English source", () => {
+        expect(placeholderDrift(localeFile, parsed)).toEqual([])
+      })
+
+      if (localeFile in TRANSLATED_CUSTODY_TERMS) {
+        it("names the account types custodial and non-custodial", () => {
+          expect(translatedCustodyTerms(localeFile, parsed)).toEqual([])
+        })
+
+        it("keeps custodial and non-custodial on the account-type keys", () => {
+          expect(missingAccountTypeTerms(parsed)).toEqual([])
+        })
+      }
+    })
+  })
+})
+
+describe("custody term guard", () => {
+  it.each(PROHIBITED_CUSTODY_FORMS)("%s flags %j", (localeFile, form) => {
+    expect(TRANSLATED_CUSTODY_TERMS[localeFile].test(form)).toBe(true)
+  })
+
+  it.each(ALLOWED_NEAR_MATCHES)("allows %j", (form) => {
+    for (const pattern of Object.values(TRANSLATED_CUSTODY_TERMS)) {
+      expect(pattern.test(form)).toBe(false)
+    }
+  })
+})

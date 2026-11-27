@@ -1,0 +1,147 @@
+import { TurboModuleRegistry, NativeModules } from "react-native"
+
+interface SourceCodeTurboModule {
+  getConstants(): {
+    scriptURL: string
+  }
+}
+
+// this is used for local development
+// will typically return localhost
+const scriptHostname = (): string => {
+  const turboModule =
+    TurboModuleRegistry.getEnforcing<SourceCodeTurboModule>("SourceCode")
+  const turboScriptURL = turboModule?.getConstants?.()?.scriptURL
+
+  const { scriptURL } = NativeModules.SourceCode || {}
+  const urlToUse = turboScriptURL || scriptURL
+
+  if (!urlToUse) {
+    return "localhost"
+  }
+
+  const parts = urlToUse.split("://")
+  if (parts.length < 2) {
+    return "localhost"
+  }
+
+  const hostPart = parts[1]?.split(":")[0]
+  return hostPart ?? "localhost"
+}
+
+// sparkscan indexes spark transfers by their UUID id; there is no signet
+// flavor, so every instance points at the mainnet explorer
+export const SPARK_EXPLORER_TX_URL = "https://sparkscan.io/tx/"
+
+export const possibleGaloyInstanceNames = ["Main", "Staging", "Local", "Custom"] as const
+export type GaloyInstanceName = (typeof possibleGaloyInstanceNames)[number]
+
+export type StandardInstance = {
+  id: "Main" | "Staging" | "Local"
+}
+
+export type CustomInstance = {
+  id: "Custom"
+  name: string
+  graphqlUri: string
+  graphqlWsUri: string
+  authUrl: string
+  kycUrl: string
+  posUrl: string
+  lnAddressHostname: string
+  blockExplorer: string
+  sparkExplorer: string
+  fiatUrl: string
+}
+
+export type GaloyInstanceInput = StandardInstance | CustomInstance
+
+export type GaloyInstance = {
+  id: GaloyInstanceName
+  name: string
+  graphqlUri: string
+  graphqlWsUri: string
+  authUrl: string
+  kycUrl: string
+  posUrl: string
+  lnAddressHostname: string
+  blockExplorer: string
+  sparkExplorer: string
+  fiatUrl: string
+}
+
+export const resolveGaloyInstanceOrDefault = (
+  input: GaloyInstanceInput,
+): GaloyInstance => {
+  if (input.id === "Custom") {
+    // A Custom instance persisted by an older app version lacks fields added
+    // since it was saved (e.g. fiatUrl, sparkExplorer) — backfill those from
+    // the Main instance defaults while keeping every persisted custom value.
+    //
+    // A blank string counts as absent, not as a custom value: the developer
+    // screen seeds every URL input with "" when the current instance is not
+    // Custom and saves them verbatim, so a user who switches to Custom while
+    // filling in only some fields would otherwise persist "" over the defaults.
+    // For kycUrl/fiatUrl that empties the WebView entry allowlist and locks KYC
+    // and buy/sell out behind a generic error (see webview.tsx entryOrigins).
+    const persistedFields = Object.fromEntries(
+      Object.entries(input).filter(
+        ([, value]) =>
+          value !== undefined && !(typeof value === "string" && value.trim() === ""),
+      ),
+    )
+    return { ...GALOY_INSTANCES[0], ...persistedFields, id: "Custom" }
+  }
+
+  const instance = GALOY_INSTANCES.find((instance) => instance.id === input.id)
+
+  // branch only to please typescript. Array,find have T | undefined as return type
+  if (instance === undefined) {
+    console.error("instance not found") // should not happen
+    return GALOY_INSTANCES[0]
+  }
+
+  return instance
+}
+
+export const GALOY_INSTANCES: readonly GaloyInstance[] = [
+  {
+    id: "Main",
+    name: "Blink",
+    graphqlUri: "https://api.blink.sv/graphql",
+    graphqlWsUri: "wss://ws.blink.sv/graphql",
+    authUrl: "https://api.blink.sv",
+    posUrl: "https://pay.blink.sv",
+    kycUrl: "https://kyc.blink.sv",
+    lnAddressHostname: "blink.sv",
+    blockExplorer: "https://mempool.space/tx/",
+    sparkExplorer: SPARK_EXPLORER_TX_URL,
+    fiatUrl: "https://fiat.blink.sv",
+  },
+  {
+    id: "Staging",
+    name: "Staging",
+    graphqlUri: "https://api.staging.blink.sv/graphql",
+    graphqlWsUri: "wss://ws.staging.blink.sv/graphql",
+    authUrl: "https://api.staging.blink.sv",
+    posUrl: "https://pay.staging.blink.sv",
+    kycUrl: "https://kyc.staging.blink.sv",
+    lnAddressHostname: "pay.staging.blink.sv",
+    blockExplorer: "https://mempool.space/signet/tx/",
+    sparkExplorer: SPARK_EXPLORER_TX_URL,
+    fiatUrl: "https://fiat.staging.blink.sv",
+  },
+  {
+    id: "Local",
+    name: "Local",
+    graphqlUri: `http://${scriptHostname()}:4455/graphql`,
+    graphqlWsUri: `ws://${scriptHostname()}:4455/graphqlws`,
+    authUrl: `http://${scriptHostname()}:4455`,
+    posUrl: `http://${scriptHostname()}:3000`,
+    kycUrl: `http://${scriptHostname()}:3000`,
+    lnAddressHostname: `${scriptHostname()}:3000`,
+    blockExplorer: "https://mempool.space/signet/tx/",
+    sparkExplorer: SPARK_EXPLORER_TX_URL,
+    fiatUrl: `http://${scriptHostname()}:3000`,
+  },
+] as const

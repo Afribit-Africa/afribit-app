@@ -1,0 +1,46 @@
+import * as React from "react"
+import { View } from "react-native"
+
+import { radius } from "@app/rne-theme/radius"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { testProps } from "@app/utils/testProps"
+import { staticSurface } from "@app/rne-theme/surfaces"
+import { makeStyles, Text } from "@rn-vui/themed"
+import { fonts } from "@app/rne-theme/fonts"
+
+import { RestrictedRegionBody } from "./restricted-region-body"
+
+export const RestrictedRegionBanner: React.FC = () => {
+  const { LL } = useI18nContext()
+  const styles = useStyles()
+
+  return (
+    <View style={styles.container} {...testProps("restricted-region-banner")}>
+      <Text style={styles.title}>{LL.RestrictedRegion.title()}</Text>
+      <RestrictedRegionBody style={styles.body} />
+    </View>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  container: {
+    borderWidth: 1,
+    borderColor: colors.accent,
+    borderRadius: radius.default,
+    ...staticSurface(colors),
+    padding: 14,
+  },
+  title: {
+    fontSize: 14,
+    fontFamily: fonts.bold,
+    lineHeight: 20,
+    color: colors.accent,
+    marginBottom: 2,
+  },
+  body: {
+    fontSize: 14,
+    fontFamily: fonts.regular,
+    lineHeight: 20,
+    color: colors.textOnBackground,
+  },
+}))

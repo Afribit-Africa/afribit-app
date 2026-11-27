@@ -1,0 +1,120 @@
+import { useCallback, useMemo, useState } from "react"
+
+import Clipboard from "@react-native-clipboard/clipboard"
+import { useNavigation } from "@react-navigation/native"
+import { NativeStackNavigationProp } from "@react-navigation/native-stack"
+import { validateMnemonic } from "bip39"
+
+import { useBip39Input } from "@app/hooks/use-bip39-input"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { PhraseStep, RootStackParamList } from "@app/navigation/stack-param-lists"
+import { splitWords } from "@app/utils/bip39-wordlist"
+import { reportError } from "@app/utils/error-logging"
+import { toastShow } from "@app/utils/toast"
+
+import { MNEMONIC_WORD_COUNT, WORDS_PER_STEP } from "../../utils"
+import { RestoreWalletStatus, useRestoreWallet } from "./use-restore-wallet"
+
+type RestorePhraseParams = {
+  step: PhraseStep
+  initialWords?: string[]
+}
+
+export const useRestorePhrase = ({ step, initialWords }: RestorePhraseParams) => {
+  const { LL } = useI18nContext()
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>()
+  const { requestRestore, status: restoreStatus } = useRestoreWallet()
+  const [validationError, setValidationError] = useState<string | null>(null)
+
+  const isStep1 = step === PhraseStep.First
+
+  const bip39 = useBip39Input({
+    wordCount: MNEMONIC_WORD_COUNT,
+    wordsPerStep: WORDS_PER_STEP,
+    step,
+    initialWords,
+  })
+
+  const handlePaste = useCallback(
+    (text: string) => {
+      const accepted = bip39.handlePaste(text)
+      if (!accepted || !isStep1) return accepted
+
+      const parsed = splitWords(text)
+      if (parsed.length === MNEMONIC_WORD_COUNT && validateMnemonic(parsed.join(" "))) {
+        navigation.navigate("selfCustodialRestorePhrase", {
+          step: PhraseStep.Second,
+          words: parsed,
+        })
+      }
+      return accepted
+    },
+    [bip39, isStep1, navigation],
+  )
+
+  /** Wired to a header onPress, so a clipboard rejection would surface as an unhandled
+   *  promise rejection; report and toast it instead, and let the user type manually. */
+  const handlePasteFromClipboard = useCallback(async () => {
+    try {
+      const text = await Clipboard.getString()
+      if (text) handlePaste(text)
+    } catch (err) {
+      reportError("Restore phrase clipboard read", err)
+      toastShow({ message: LL.RestoreScreen.pasteFailed(), LL })
+    }
+  }, [handlePaste, LL])
+
+  const isValid = useMemo(() => {
+    if (!bip39.allFilled) return false
+    return validateMnemonic(bip39.words.join(" "))
+  }, [bip39.words, bip39.allFilled])
+
+  const handleContinue = useCallback(() => {
+    navigation.navigate("selfCustodialRestorePhrase", {
+      step: PhraseStep.Second,
+      words: bip39.words,
+    })
+  }, [navigation, bip39.words])
+
+  const handleRestore = useCallback(async () => {
+    const mnemonic = bip39.words.join(" ")
+    if (!validateMnemonic(mnemonic)) {
+      setValidationError(LL.RestoreScreen.invalidMnemonic())
+      return
+    }
+    await requestRestore(mnemonic).catch(() => {})
+  }, [bip39.words, requestRestore, LL])
+
+  const updateWord = useCallback(
+    (index: number, value: string) => {
+      bip39.updateWord(index, value)
+      setValidationError(null)
+    },
+    [bip39],
+  )
+
+  return {
+    words: bip39.words,
+    stepWords: bip39.stepWords,
+    offset: bip39.offset,
+    activeIndex: bip39.activeIndex,
+    setActiveIndex: bip39.setActiveIndex,
+    suggestions: bip39.suggestions,
+    selectSuggestion: bip39.selectSuggestion,
+    handlePaste,
+    stepFilled: bip39.stepFilled,
+    allFilled: bip39.allFilled,
+    focusRequest: bip39.focusRequest,
+    clearFocusRequest: bip39.clearFocusRequest,
+    updateWord,
+    handlePasteFromClipboard,
+    isValid,
+    validationError,
+    status: restoreStatus,
+    isStep1,
+    handleContinue,
+    handleRestore,
+  }
+}
+
+export { RestoreWalletStatus as RestoreStatus }

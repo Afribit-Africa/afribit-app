@@ -1,0 +1,17 @@
+{
+  "extends": "@react-native/typescript-config/tsconfig.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "customConditions": ["react-native", "react-native-legacy-deep-imports"],
+    "moduleSuffixes": [".native", ""],
+    "allowJs": false,
+    "noEmit": true,
+    "baseUrl": "./",
+    "paths": {
+      "@app/*": ["app/*"],
+      "@mocks/*": ["__mocks__/*"]
+    },
+    "types": ["node", "react-native", "jest"]
+  },
+  "include": ["index.tsx", "app", "__tests__", "__mocks__", "jest.setup-after-env.ts"]
+}

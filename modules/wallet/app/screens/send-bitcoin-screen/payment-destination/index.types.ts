@@ -1,0 +1,161 @@
+import { LnUrlPayServiceResponse } from "lnurl-pay"
+
+import {
+  AccountDefaultWalletLazyQueryHookResult,
+  Network,
+  WalletCurrency,
+} from "@app/graphql/generated"
+import { WalletDescriptor } from "@app/types/wallets"
+import { type SparkPaymentDestination } from "./spark"
+import {
+  IntraledgerPaymentDestination,
+  LightningPaymentDestination,
+  LnurlPaymentDestination,
+  Merchant,
+  MerchantPaymentDestination as BlinkMerchantPaymentDestination,
+  OnchainPaymentDestination,
+  ParsedPaymentDestination,
+  PaymentType,
+  InputSource,
+} from "@blinkbitcoin/blink-client"
+
+import { ConvertMoneyAmount, PaymentDetail } from "../payment-details"
+
+export type ParseDestinationResult =
+  | Destination
+  | MerchantChoiceDestination
+  | InvalidDestination
+
+export const MerchantPaymentType = PaymentType.Merchant
+
+export type MerchantChoice = Merchant
+
+export type MerchantPaymentDestination = BlinkMerchantPaymentDestination
+
+export type MerchantChoiceDestination = {
+  valid: true
+  validDestination: MerchantPaymentDestination
+  destinationDirection: typeof DestinationDirection.Send
+}
+
+export type ParseDestinationParams = {
+  rawInput: string
+  myWalletIds: string[]
+  bitcoinNetwork: Network
+  lnurlDomains: string[]
+  accountDefaultWalletQuery: AccountDefaultWalletLazyQueryHookResult[0]
+  inputSource?: InputSource
+  displayCurrency?: string
+  preferLnurlForInternalHandles?: boolean
+  /**
+   * `lnurlDomains` answers two questions at once: which hosts name one of our accounts,
+   * and which destinations are paid over the ledger. A self-custodial sender needs the
+   * first, so its own pay codes are recognised as naming an account, and cannot use the
+   * second, having no token for the intraledger mutation. Defaults to true, which is
+   * every caller that pays as a custodial account.
+   */
+  canPayIntraledger?: boolean
+}
+
+export const DestinationDirection = {
+  Send: "Send",
+  Receive: "Receive",
+} as const
+
+export type DestinationDirection =
+  (typeof DestinationDirection)[keyof typeof DestinationDirection]
+
+export type Destination = PaymentDestination | ReceiveDestination
+
+export type PaymentDestination = {
+  valid: true
+  validDestination: ValidParsedPaymentDestination
+  destinationDirection: typeof DestinationDirection.Send
+  createPaymentDetail: <T extends WalletCurrency>(
+    params: CreatePaymentDetailParams<T>,
+  ) => PaymentDetail<T>
+}
+
+export type CreatePaymentDetailParams<T extends WalletCurrency> = {
+  convertMoneyAmount: ConvertMoneyAmount
+  sendingWalletDescriptor: WalletDescriptor<T>
+}
+
+export type ReceiveDestination = {
+  valid: true
+  validDestination: ValidParsedReceiveDestination
+  destinationDirection: typeof DestinationDirection.Receive
+}
+
+export const isSendDestination = (
+  result: ParseDestinationResult,
+): result is PaymentDestination =>
+  result.valid &&
+  result.destinationDirection === DestinationDirection.Send &&
+  !isMerchantChoiceDestination(result)
+
+export const isMerchantChoiceDestination = (
+  result: ParseDestinationResult,
+): result is MerchantChoiceDestination =>
+  result.valid && result.validDestination.paymentType === MerchantPaymentType
+
+export type InvalidDestination = {
+  valid: false
+  invalidPaymentDestination: ParsedPaymentDestination | MerchantPaymentDestination
+  invalidReason: InvalidDestinationReason
+}
+
+export const InvalidDestinationReason = {
+  UnknownDestination: "UnknownDestination",
+  InvoiceExpired: "InvoiceExpired",
+  WrongNetwork: "WrongNetwork",
+  InvalidAmount: "InvalidAmount",
+  UsernameDoesNotExist: "UsernameDoesNotExist",
+  /** The name could not be checked, which is not the same as it not existing. Telling a
+   *  user that a real payee does not exist is the worst outcome this screen can produce:
+   *  it sends them to correct a spelling that was right. */
+  DestinationUnverifiable: "DestinationUnverifiable",
+  SelfPayment: "SelfPayment",
+  LnurlUnsupported: "LnurlUnsupported",
+  LnurlServiceError: "LnurlServiceError",
+  LnurlError: "LnurlError",
+  UnknownLightning: "UnknownLightning",
+  UnknownOnchain: "UnknownOnchain",
+  WrongDomain: "WrongDomain",
+} as const
+
+export type InvalidDestinationReason =
+  (typeof InvalidDestinationReason)[keyof typeof InvalidDestinationReason]
+
+export const isUnresolvedUsername = (result: ParseDestinationResult): boolean =>
+  !result.valid && result.invalidReason === InvalidDestinationReason.UsernameDoesNotExist
+
+export type ValidParsedPaymentDestination = (
+  | ResolvedLnurlPaymentDestination
+  | LightningPaymentDestination
+  | OnchainPaymentDestination
+  | ResolvedIntraledgerPaymentDestination
+  | SparkPaymentDestination
+) & { valid: true }
+
+export type ResolvedIntraledgerPaymentDestination = IntraledgerPaymentDestination & {
+  valid: true
+} & { walletId: string }
+
+export type ResolvedLnurlPaymentDestination = LnurlPaymentDestination & {
+  lnurlParams: LnUrlPayServiceResponse
+}
+
+export type ValidParsedReceiveDestination = LnurlWithdrawDestination
+
+export type LnurlWithdrawDestination = {
+  paymentType: typeof PaymentType.Lnurl
+  valid: true
+  lnurl: string
+  callback: string
+  domain: string
+  k1: string
+  defaultDescription: string
+  minWithdrawable: number
+  maxWithdrawable: number
+}

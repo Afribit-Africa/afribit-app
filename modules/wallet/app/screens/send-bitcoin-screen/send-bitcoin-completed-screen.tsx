@@ -1,0 +1,465 @@
+import React, { useCallback, useEffect, useRef, useState } from "react"
+import { AppState, View, ScrollView } from "react-native"
+import ViewShot, { type ViewShotRef } from "react-native-view-shot"
+
+import { radius } from "@app/rne-theme/radius"
+import { GaloyIcon } from "@app/components/atomic/galoy-icon"
+import { Screen } from "@app/components/screen"
+import {
+  CompletedTextAnimation,
+  SuccessIconAnimation,
+} from "@app/components/success-animation"
+import { SuccessActionComponent } from "@app/components/success-action"
+import { useSettingsScreenQuery } from "@app/graphql/generated"
+import { useScreenshot } from "@app/hooks"
+import { useIsSelfCustodialAccount } from "@app/hooks/use-is-self-custodial-account"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { RootStackParamList } from "@app/navigation/stack-param-lists"
+import { RouteProp, useNavigation } from "@react-navigation/native"
+import { NativeStackNavigationProp } from "@react-navigation/native-stack"
+import { makeStyles, Text, useTheme } from "@rn-vui/themed"
+
+import { testProps } from "../../utils/testProps"
+import { PaymentSendCompletedStatus } from "./use-send-payment"
+import { AfribitLogo } from "@app/components/afribit-logo"
+import { GaloyPrimaryButton } from "@app/components/atomic/galoy-primary-button"
+import { SuccessActionTag } from "@app/components/success-action/success-action"
+import { LNURLPaySuccessAction, utils } from "lnurl-pay"
+import { formatUnixTimestampYMDHM } from "@app/utils/date"
+import {
+  formatTimeToMempool,
+  timeToMempool,
+} from "../transaction-detail-screen/format-time"
+import { GaloyIconButton } from "@app/components/atomic/galoy-icon-button"
+import { TranslationFunctions } from "@app/i18n/i18n-types"
+import { useRemoteConfig } from "@app/config/feature-flags-context"
+import { PaymentType } from "@blinkbitcoin/blink-client"
+
+type StatusProcessed = "SUCCESS" | "PENDING" | "QUEUED"
+
+interface Props {
+  route: RouteProp<RootStackParamList, "sendBitcoinCompleted">
+}
+
+const processStatus = ({
+  status,
+  arrivalAtMempoolEstimate,
+}: {
+  status: PaymentSendCompletedStatus
+  arrivalAtMempoolEstimate: number | undefined
+}): StatusProcessed => {
+  if (status === "SUCCESS") return "SUCCESS"
+  return arrivalAtMempoolEstimate ? "QUEUED" : "PENDING"
+}
+
+const formatPaymentType = ({
+  blinkToBlinkLabel,
+  paymentType,
+}: {
+  blinkToBlinkLabel: string
+  paymentType?: PaymentType | string
+}): string => {
+  return paymentType === PaymentType.Intraledger ? blinkToBlinkLabel : paymentType ?? ""
+}
+
+const useSuccessMessage = (
+  successAction?: LNURLPaySuccessAction,
+  preimage?: string,
+): string => {
+  return useCallback(() => {
+    if (!successAction) return ""
+
+    const { tag, message, description, url } = successAction
+    const decryptedMessage =
+      tag === SuccessActionTag.AES && preimage
+        ? utils.decipherAES({ successAction, preimage })
+        : null
+
+    const textContent = [message, description, decryptedMessage].filter(Boolean).join(" ")
+    const includeUrl = url && !textContent.includes(url)
+
+    return includeUrl ? `${textContent} ${url}`.trim() : textContent
+  }, [successAction, preimage])()
+}
+
+const STALE_BACKGROUND_MS = 30_000
+
+/** Quick trips away (opening a link, locking the phone) keep the receipt on return. */
+const useOnStaleBackgroundReturn = (onStaleReturn: () => void) => {
+  const backgroundedAt = useRef<number | null>(null)
+  const onStaleReturnRef = useRef(onStaleReturn)
+
+  useEffect(() => {
+    onStaleReturnRef.current = onStaleReturn
+  }, [onStaleReturn])
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextAppState) => {
+      if (nextAppState === "background") {
+        backgroundedAt.current = Date.now()
+        return
+      }
+      const tripStartedAt = backgroundedAt.current
+      const isReturningToForeground = nextAppState === "active" && tripStartedAt !== null
+      if (!isReturningToForeground) return
+
+      backgroundedAt.current = null
+      const isStale = Date.now() - tripStartedAt >= STALE_BACKGROUND_MS
+      if (isStale) {
+        onStaleReturnRef.current()
+      }
+    })
+    return () => subscription.remove()
+  }, [])
+}
+
+const SuccessIconComponent: React.FC<{
+  status: StatusProcessed
+  arrivalAtMempoolEstimate: number | undefined
+}> = ({ status, arrivalAtMempoolEstimate }) => {
+  const styles = useStyles()
+  const {
+    theme: { colors },
+  } = useTheme()
+  const { LL, locale } = useI18nContext()
+
+  const getStatusIcon = () => {
+    const iconMap = {
+      SUCCESS: () => <GaloyIcon name="payment-success" size={100} />,
+      QUEUED: () => <GaloyIcon name="payment-pending" size={100} />,
+      PENDING: () => <GaloyIcon name="warning" color={colors.warning} size={100} />,
+    }
+    return iconMap[status]()
+  }
+
+  const getStatusText = () => {
+    const textMap = {
+      SUCCESS: () => LL.SendBitcoinScreen.success(),
+      QUEUED: () =>
+        LL.TransactionDetailScreen.txNotBroadcast({
+          countdown: formatTimeToMempool(
+            timeToMempool(arrivalAtMempoolEstimate as number),
+            LL,
+            locale,
+          ),
+        }),
+      PENDING: () => LL.SendBitcoinScreen.pendingPayment(),
+    }
+    return textMap[status]()
+  }
+
+  return (
+    <View style={styles.successViewContainer} {...testProps("Success Text")}>
+      <SuccessIconAnimation>{getStatusIcon()}</SuccessIconAnimation>
+      <CompletedTextAnimation>
+        <Text style={styles.completedText} {...testProps(status)} type={"p2"}>
+          {getStatusText()}
+        </Text>
+      </CompletedTextAnimation>
+    </View>
+  )
+}
+
+const PaymentDetailsSection: React.FC<{
+  currencyAmount?: string
+  satAmount?: string
+  satFeeAmount?: string
+  currencyFeeAmount?: string
+  usernameTitle: string
+  destination?: string
+  createdAt?: number
+  paymentType?: PaymentType | string
+  LL: TranslationFunctions
+}> = ({
+  currencyAmount,
+  satAmount,
+  satFeeAmount,
+  currencyFeeAmount,
+  usernameTitle,
+  destination,
+  createdAt,
+  paymentType,
+  LL,
+}) => {
+  const styles = useStyles()
+
+  const formattedTime = createdAt
+    ? formatUnixTimestampYMDHM({ timestampSeconds: createdAt })
+    : ""
+
+  return (
+    <>
+      <View style={styles.successActionFieldContainer}>
+        <SuccessActionComponent
+          title={LL.SendBitcoinScreen.amount()}
+          text={currencyAmount}
+          subValue={satAmount}
+          key="amount"
+          visible={Boolean(currencyAmount)}
+        />
+        <SuccessActionComponent
+          title={LL.SendBitcoinScreen.feeLabel()}
+          text={currencyFeeAmount}
+          subValue={satFeeAmount}
+          key="fee"
+          visible={Boolean(currencyFeeAmount)}
+        />
+        <SuccessActionComponent
+          title={LL.SendBitcoinScreen.sender()}
+          text={usernameTitle}
+          key="sender"
+          visible={Boolean(usernameTitle)}
+        />
+        <SuccessActionComponent
+          title={LL.SendBitcoinScreen.recipient()}
+          text={destination}
+          key="recipient"
+          visible={Boolean(destination)}
+        />
+      </View>
+
+      <View style={styles.successActionFieldContainer}>
+        <SuccessActionComponent
+          title={LL.SendBitcoinScreen.time()}
+          text={formattedTime}
+          key="time"
+          visible={Boolean(createdAt)}
+        />
+        <SuccessActionComponent
+          title={LL.SendBitcoinScreen.type()}
+          text={formatPaymentType({
+            blinkToBlinkLabel: LL.common.blinkToBlink(),
+            paymentType,
+          })}
+          key="type"
+          visible={Boolean(paymentType)}
+        />
+      </View>
+    </>
+  )
+}
+
+const NoteSection: React.FC<{
+  noteMessage: string
+  LL: TranslationFunctions
+}> = ({ noteMessage, LL }) => {
+  const styles = useStyles()
+
+  if (!noteMessage) return null
+
+  return (
+    <View style={styles.successActionFieldContainer}>
+      <SuccessActionComponent
+        title={LL.SendBitcoinScreen.noteLabel()}
+        text={noteMessage}
+        key="note"
+        visible={Boolean(noteMessage)}
+      />
+    </View>
+  )
+}
+
+const HeaderSection: React.FC<{
+  isTakingScreenshot: boolean
+  onClose: () => void
+}> = ({ isTakingScreenshot, onClose }) => {
+  const styles = useStyles()
+
+  if (isTakingScreenshot) return null
+
+  return (
+    <View style={styles.headerContainer}>
+      <GaloyIconButton iconOnly size="large" name="close" onPress={onClose} />
+    </View>
+  )
+}
+
+const SendBitcoinCompletedScreen: React.FC<Props> = ({ route }) => {
+  const [showSuccessIcon, setShowSuccessIcon] = useState(true)
+  const viewRef = useRef<ViewShotRef>(null)
+
+  const {
+    arrivalAtMempoolEstimate,
+    status: statusRaw,
+    successAction,
+    preimage,
+    note,
+    currencyAmount,
+    satAmount,
+    currencyFeeAmount,
+    satFeeAmount,
+    destination,
+    paymentType,
+    createdAt,
+  } = route.params
+
+  const styles = useStyles()
+  const navigation =
+    useNavigation<NativeStackNavigationProp<RootStackParamList, "sendBitcoinCompleted">>()
+  const { LL } = useI18nContext()
+
+  /** Self-custodial accounts have no Blink username, so skip the custodial `me` query
+   *  and drop the Sender row rather than falling back to "Blink User". Keyed on the
+   *  account type, not `useActiveWallet().isSelfCustodial`, so it stays skipped while
+   *  the SDK is still loading or the account needs restoring. */
+  const isSelfCustodial = useIsSelfCustodialAccount()
+  const { data } = useSettingsScreenQuery({
+    skip: isSelfCustodial,
+    fetchPolicy: "cache-first",
+  })
+  const { successIconDuration } = useRemoteConfig()
+
+  const status = processStatus({ arrivalAtMempoolEstimate, status: statusRaw })
+  const usernameTitle = isSelfCustodial
+    ? ""
+    : data?.me?.username || LL.common.walletUser()
+  const successActionMessage = useSuccessMessage(successAction, preimage)
+  /** The Note shows the LNURL success action if present, otherwise the payment memo. */
+  const noteMessage = successActionMessage || note?.trim() || ""
+
+  const { isTakingScreenshot, captureAndShare } = useScreenshot(viewRef)
+
+  useEffect(() => {
+    const timer = setTimeout(() => setShowSuccessIcon(false), successIconDuration)
+    return () => clearTimeout(timer)
+  }, [successIconDuration])
+
+  const handleNavigateHome = useCallback(() => navigation.popToTop(), [navigation])
+
+  /** Carries a stale return that arrived while the receipt was covered, until the focus
+   *  listener below can spend it. Dropping it instead would strand the receipt for the rest
+   *  of the session, which is the very thing this screen dismisses itself to avoid. */
+  const isDismissalDeferred = useRef(false)
+
+  /** A covered receipt must not steal navigation: on a second background trip taken from
+   *  the app-lock screen, popping would tear the lock off the stack and expose Home while
+   *  the app is still locked. The first trip is never covered, because AppStateWrapper
+   *  raises the lock only after awaiting the keystore, so this synchronous listener always
+   *  runs first. That relock has to stay asynchronous: were it to push the lock before this
+   *  runs, the receipt would survive underneath and the isResume goBack would land the user
+   *  right back on it. */
+  const handleStaleReturn = useCallback(() => {
+    if (!navigation.isFocused()) {
+      isDismissalDeferred.current = true
+      return
+    }
+    handleNavigateHome()
+  }, [navigation, handleNavigateHome])
+
+  useOnStaleBackgroundReturn(handleStaleReturn)
+
+  /** Whatever covered the receipt is gone and the stale one is on screen again, so the
+   *  dismissal held back above is safe to run now. */
+  useEffect(
+    () =>
+      navigation.addListener("focus", () => {
+        if (!isDismissalDeferred.current) return
+        isDismissalDeferred.current = false
+        handleNavigateHome()
+      }),
+    [navigation, handleNavigateHome],
+  )
+
+  if (showSuccessIcon) {
+    return (
+      <Screen headerShown={false}>
+        <SuccessIconComponent
+          status={status}
+          arrivalAtMempoolEstimate={arrivalAtMempoolEstimate}
+        />
+      </Screen>
+    )
+  }
+
+  return (
+    <Screen headerShown={false}>
+      <HeaderSection
+        isTakingScreenshot={isTakingScreenshot}
+        onClose={handleNavigateHome}
+      />
+
+      <ViewShot ref={viewRef} style={styles.viewShot}>
+        <View style={styles.screenContainer}>
+          <AfribitLogo size={110} />
+
+          <View style={styles.container}>
+            <ScrollView>
+              <PaymentDetailsSection
+                currencyAmount={currencyAmount}
+                satAmount={satAmount}
+                satFeeAmount={satFeeAmount}
+                currencyFeeAmount={currencyFeeAmount}
+                usernameTitle={usernameTitle}
+                destination={destination}
+                createdAt={createdAt}
+                paymentType={paymentType}
+                LL={LL}
+              />
+
+              <NoteSection noteMessage={noteMessage} LL={LL} />
+            </ScrollView>
+          </View>
+
+          {!isTakingScreenshot && (
+            <GaloyPrimaryButton
+              style={styles.shareButton}
+              onPress={captureAndShare}
+              title={LL.common.share()}
+              underlayColor="transparent"
+            />
+          )}
+        </View>
+      </ViewShot>
+    </Screen>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  headerContainer: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    alignItems: "center",
+    padding: 16,
+    paddingBottom: 6,
+  },
+  screenContainer: {
+    flexGrow: 1,
+    marginHorizontal: 20,
+  },
+  viewShot: {
+    flexGrow: 1,
+    backgroundColor: colors.backgroundDefault,
+  },
+  completedText: {
+    textAlign: "center",
+    marginTop: 20,
+    marginHorizontal: 28,
+  },
+  container: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    marginTop: 20,
+  },
+  shareButton: {
+    marginTop: 10,
+    marginBottom: 20,
+  },
+  successActionFieldContainer: {
+    overflow: "hidden",
+    gap: 20,
+    backgroundColor: colors.surfaceInteractive,
+    borderRadius: radius.default,
+    alignItems: "center",
+    paddingHorizontal: 10,
+    paddingVertical: 14,
+    marginBottom: 12,
+  },
+  successViewContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+}))
+
+export default SendBitcoinCompletedScreen

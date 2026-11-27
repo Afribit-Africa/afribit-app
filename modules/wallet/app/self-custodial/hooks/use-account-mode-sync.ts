@@ -1,0 +1,133 @@
+import { useEffect, useRef, useState } from "react"
+import { AppState } from "react-native"
+
+import { useSelfCustodialAccountMode } from "@app/self-custodial/hooks/use-self-custodial-account-mode"
+import { usePersistentStateContext } from "@app/store/persistent-state"
+import { resolveActiveSelfCustodialId } from "@app/store/persistent-state/active-self-custodial-account"
+import {
+  getSelfCustodialServerAccountMode,
+  withSelfCustodialModeFromServer,
+  withSelfCustodialServerAccountMode,
+} from "@app/store/persistent-state/self-custodial-server-account-mode"
+import { reportError } from "@app/utils/error-logging"
+
+import { recoverLnurlServerMode, setLnurlServerMode } from "../lnurl-server-mode"
+import { useSelfCustodialWallet } from "../providers/wallet"
+
+import { useLnurlServer } from "./use-lnurl-server"
+
+/**
+ * Sends `request` unless one under the same key is still waiting on the server. The key
+ * leaves the set when the request settles either way, so a failure is retried by the
+ * next caller rather than suppressed for good.
+ */
+const runOnce = (
+  inFlight: Set<string>,
+  key: string,
+  request: () => Promise<void>,
+): void => {
+  if (inFlight.has(key)) return
+  inFlight.add(key)
+  request().finally(() => inFlight.delete(key))
+}
+
+/**
+ * Keeps an account's mode and the LNURL server's copy of it in agreement, which is what
+ * activates or silences its Lightning Address.
+ *
+ * An account holding no mode is settled from the server before anything is pushed: the
+ * same wallet may already be Anon on another device, and assuming Enhanced would push
+ * that away. Only once a mode is known does a disagreement become a push.
+ *
+ * Both are driven off stored state rather than off the moment the user picks a mode: the
+ * choice is made on screens with no connected SDK to sign with, and a push that fails
+ * offline has to happen later anyway. What lands is recorded so the next launch stays
+ * quiet, since each Enhanced push costs the server a paid country lookup.
+ *
+ * A failure is retried on the next return to the foreground rather than only on the next
+ * launch, so a user who regains signal mid-session gets their Lightning Address back
+ * without restarting the app. Only on the foreground, never on a timer: a retry loop
+ * against an Enhanced push would bill the server a country lookup per attempt.
+ */
+export const useAccountModeSync = (): void => {
+  const { accountMode } = useSelfCustodialAccountMode()
+  const { persistentState, updateState } = usePersistentStateContext()
+  const { sdk, connectedAccountId } = useSelfCustodialWallet()
+  const { serverUrl: lnurlServerUrl } = useLnurlServer()
+
+  const activeAccountId = resolveActiveSelfCustodialId(persistentState)
+  const serverMode = activeAccountId
+    ? getSelfCustodialServerAccountMode(persistentState, activeAccountId)
+    : null
+  /**
+   * The SDK signs as whichever account it connected for, while the mode and the record are
+   * read from persistent state. Those two disagree for a commit on every account switch,
+   * since the provider's teardown runs after this hook's effects: acting then would sign as
+   * the previous account, push its Lightning Address away, and file the confirmation under
+   * the new one, which would then never be pushed at all. Neither effect is due until the
+   * connection and the active account are the same account.
+   */
+  const isSdkOnActiveAccount =
+    Boolean(activeAccountId) && connectedAccountId === activeAccountId
+
+  const isPushDue =
+    isSdkOnActiveAccount && Boolean(accountMode) && accountMode !== serverMode
+  /** An account that has never held a mode, whatever the reason: created before the modes
+   *  existed, or provisioned on another device. */
+  const isResolveDue = isSdkOnActiveAccount && !accountMode
+
+  /** Bumped on each return to the foreground, which is what re-runs a sync that failed
+   *  while the server was unreachable. Nothing renders from it. */
+  const [foregroundCount, setForegroundCount] = useState(0)
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (status) => {
+      if (status === "active") setForegroundCount((count) => count + 1)
+    })
+    return () => subscription.remove()
+  }, [])
+
+  /**
+   * The requests still waiting on the server, by what they ask. A return to the
+   * foreground while one is pending would otherwise send it again: it is still due,
+   * since nothing has landed, and for an Enhanced push a second identical request is a
+   * second paid country lookup and two writes racing.
+   */
+  const inFlightRef = useRef(new Set<string>())
+
+  useEffect(() => {
+    if (!sdk || !isResolveDue || !activeAccountId) return
+    runOnce(inFlightRef.current, `resolve:${activeAccountId}`, () =>
+      recoverLnurlServerMode({ sdk, serverUrl: lnurlServerUrl })
+        .then((recovered) => {
+          updateState(
+            (prev) =>
+              prev && withSelfCustodialModeFromServer(prev, activeAccountId, recovered),
+          )
+        })
+        .catch((err) => reportError("lnurl server mode resolve", err)),
+    )
+  }, [sdk, isResolveDue, activeAccountId, lnurlServerUrl, updateState, foregroundCount])
+
+  useEffect(() => {
+    if (!sdk || !isPushDue || !activeAccountId || !accountMode) return
+    runOnce(inFlightRef.current, `push:${activeAccountId}:${accountMode}`, () =>
+      setLnurlServerMode({ sdk, serverUrl: lnurlServerUrl, mode: accountMode })
+        .then(() => {
+          updateState(
+            (prev) =>
+              prev &&
+              withSelfCustodialServerAccountMode(prev, activeAccountId, accountMode),
+          )
+        })
+        .catch((err) => reportError("lnurl server mode sync", err)),
+    )
+  }, [
+    sdk,
+    isPushDue,
+    activeAccountId,
+    accountMode,
+    lnurlServerUrl,
+    updateState,
+    foregroundCount,
+  ])
+}

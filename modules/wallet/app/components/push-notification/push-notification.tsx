@@ -1,0 +1,87 @@
+import React, { type JSX, useEffect } from "react"
+
+import { useApolloClient } from "@apollo/client"
+import { BulletinsDocument } from "@app/graphql/generated"
+import { useIsAuthed } from "@app/graphql/is-authed-context"
+import { addDeviceToken, hasNotificationPermission } from "@app/utils/notifications"
+import messaging, { FirebaseMessagingTypes } from "@react-native-firebase/messaging"
+import { openWalletUrl } from "@app/navigation/wallet-links"
+
+export const PushNotificationComponent = (): JSX.Element => {
+  const client = useApolloClient()
+  const isAuthed = useIsAuthed()
+
+  useEffect(() => {
+    const followNotificationLink = (
+      remoteMessage: FirebaseMessagingTypes.RemoteMessage,
+    ) => {
+      try {
+        const linkToScreen = remoteMessage.data?.linkTo ?? ""
+        if (
+          typeof linkToScreen === "string" &&
+          linkToScreen &&
+          linkToScreen.startsWith("/")
+        ) {
+          // Forward the receiving account hint when the payload provides one so
+          // multi-account devices can resolve the tx with a single probe (#3826).
+          // Only transaction links understand the hint — appending it elsewhere
+          // would leak a stray param into unrelated screens.
+          const recipientUserId = remoteMessage.data?.recipientUserId
+          const link =
+            typeof recipientUserId === "string" &&
+            recipientUserId &&
+            linkToScreen.startsWith("/transaction/") &&
+            !linkToScreen.includes("?")
+              ? `${linkToScreen}?recipientUserId=${encodeURIComponent(recipientUserId)}`
+              : linkToScreen
+          openWalletUrl("blink:" + link)
+        }
+        // linkTo throws an error if the link is invalid
+      } catch (error) {
+        console.error("Error in showNotification", error)
+      }
+    }
+
+    // When the application is running, but in the background.
+    const unsubscribeBackground = messaging().onNotificationOpenedApp(
+      (remoteMessage: FirebaseMessagingTypes.RemoteMessage) => {
+        followNotificationLink(remoteMessage)
+      },
+    )
+
+    const unsubscribeInApp = messaging().onMessage(async () => {
+      client.refetchQueries({ include: [BulletinsDocument] })
+    })
+
+    // When the application is opened from a quit state.
+    messaging()
+      .getInitialNotification()
+      .then((remoteMessage: FirebaseMessagingTypes.RemoteMessage | null) => {
+        if (remoteMessage) {
+          followNotificationLink(remoteMessage)
+        }
+      })
+
+    return () => {
+      unsubscribeInApp()
+      unsubscribeBackground()
+    }
+  }, [client])
+
+  useEffect(() => {
+    ;(async () => {
+      if (isAuthed && client) {
+        const hasPermission = await hasNotificationPermission()
+        if (hasPermission) {
+          addDeviceToken(client)
+          const unsubscribeFromRefresh = messaging().onTokenRefresh(() =>
+            addDeviceToken(client),
+          )
+          return unsubscribeFromRefresh
+        }
+      }
+    })()
+  }, [client, isAuthed])
+
+  return <></>
+}

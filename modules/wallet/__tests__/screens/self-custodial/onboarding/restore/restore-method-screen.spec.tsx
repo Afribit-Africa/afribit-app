@@ -1,0 +1,343 @@
+import React from "react"
+import { Platform, Pressable, Text } from "react-native"
+
+import { act, fireEvent, render } from "@testing-library/react-native"
+import { loadLocale } from "@app/i18n/i18n-util.sync"
+import { i18nObject } from "@app/i18n/i18n-util"
+
+import { IconHero } from "@app/components/icon-hero"
+import { RestoreMethodScreen } from "@app/screens/self-custodial/onboarding/restore/restore-method-screen"
+import theme from "@app/rne-theme/theme"
+
+import { ContextForScreen } from "../../../helper"
+import { flushEffects } from "../../../../helpers/flush-effects"
+
+const mockNavigate = jest.fn()
+jest.mock("@react-navigation/native", () => ({
+  ...jest.requireActual("@react-navigation/native"),
+  useNavigation: () => ({ navigate: mockNavigate }),
+}))
+
+const mockRead = jest.fn()
+let mockLoading = false
+
+jest.mock("@app/screens/self-custodial/onboarding/hooks/use-credential-backup", () => ({
+  CredentialError: {
+    NoProvider: "no-provider",
+    UserCancelled: "user-cancelled",
+    Unsupported: "unsupported",
+    Unknown: "unknown",
+  },
+  useCredentialBackup: () => ({
+    save: jest.fn(),
+    read: mockRead,
+    loading: mockLoading,
+  }),
+}))
+
+const mockRequestRestore = jest.fn()
+jest.mock(
+  "@app/screens/self-custodial/onboarding/restore/hooks/use-restore-wallet",
+  () => ({
+    useRestoreWallet: () => ({ requestRestore: mockRequestRestore }),
+  }),
+)
+
+const mockToastShow = jest.fn()
+jest.mock("@app/utils/toast", () => ({
+  toastShow: (...args: readonly unknown[]) => mockToastShow(...args),
+}))
+
+const mockReportError = jest.fn()
+jest.mock("@app/utils/error-logging", () => ({
+  ...jest.requireActual("@app/utils/error-logging"),
+  reportError: (...args: readonly unknown[]) => mockReportError(...args),
+}))
+
+jest.mock("@app/components/atomic/galoy-primary-button", () => ({
+  GaloyPrimaryButton: ({ title, onPress }: { title: string; onPress: () => void }) => (
+    <Pressable testID={`primary-${title}`} onPress={onPress}>
+      <Text>{title}</Text>
+    </Pressable>
+  ),
+}))
+
+jest.mock("@app/components/atomic/galoy-secondary-button", () => ({
+  GaloySecondaryButton: ({ title, onPress }: { title: string; onPress: () => void }) => (
+    <Pressable testID={`secondary-${title}`} onPress={onPress}>
+      <Text>{title}</Text>
+    </Pressable>
+  ),
+}))
+
+jest.mock("@app/components/icon-hero", () => ({
+  IconHero: jest.fn(({ title, subtitle }: { title: string; subtitle: string }) => (
+    <>
+      <Text>{title}</Text>
+      <Text>{subtitle}</Text>
+    </>
+  )),
+}))
+
+loadLocale("en")
+const LL = i18nObject("en")
+
+describe("RestoreMethodScreen", () => {
+  const originalPlatform = Platform.OS
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLoading = false
+  })
+
+  afterEach(() => {
+    Object.defineProperty(Platform, "OS", { configurable: true, value: originalPlatform })
+  })
+
+  it("renders the hero icon with the green color", async () => {
+    render(
+      <ContextForScreen>
+        <RestoreMethodScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    const iconHeroMock = IconHero as unknown as jest.Mock
+    const props = iconHeroMock.mock.calls[0][0]
+
+    expect(props.iconColor).toBe(theme.lightColors?.success)
+    expect(props.icon).toBe("cloud")
+  })
+
+  it("navigates to the cloud restore screen when the cloud button is pressed", async () => {
+    const { getByTestId } = render(
+      <ContextForScreen>
+        <RestoreMethodScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    fireEvent.press(getByTestId(`primary-${LL.BackupScreen.BackupMethod.appleICloud()}`))
+    expect(mockNavigate).toHaveBeenCalledWith("selfCustodialCloudRestore")
+  })
+
+  it("navigates to the manual restore screen when the manual button is pressed", async () => {
+    const { getByTestId } = render(
+      <ContextForScreen>
+        <RestoreMethodScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    fireEvent.press(
+      getByTestId(`secondary-${LL.BackupScreen.BackupMethod.manualBackup()}`),
+    )
+    expect(mockNavigate).toHaveBeenCalledWith("selfCustodialRestorePhrase", {
+      step: 1,
+    })
+  })
+
+  it("hides the password manager button on iOS", async () => {
+    Object.defineProperty(Platform, "OS", { configurable: true, value: "ios" })
+
+    const { queryByTestId } = render(
+      <ContextForScreen>
+        <RestoreMethodScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    expect(
+      queryByTestId(`secondary-${LL.BackupScreen.BackupMethod.passwordManager()}`),
+    ).toBeNull()
+  })
+
+  describe("password manager restore", () => {
+    const passwordManagerTestId = () =>
+      `secondary-${LL.BackupScreen.BackupMethod.passwordManager()}`
+
+    beforeEach(() => {
+      Object.defineProperty(Platform, "OS", { configurable: true, value: "android" })
+    })
+
+    it("restores the wallet on successful read", async () => {
+      mockRead.mockResolvedValue({
+        success: true,
+        walletIdentifier: "pubkey-1",
+        mnemonic: "word1 word2 word3",
+      })
+      mockRequestRestore.mockResolvedValue(undefined)
+
+      const { getByTestId } = render(
+        <ContextForScreen>
+          <RestoreMethodScreen />
+        </ContextForScreen>,
+      )
+      await flushEffects()
+
+      await act(async () => {
+        fireEvent.press(getByTestId(passwordManagerTestId()))
+      })
+
+      expect(mockRequestRestore).toHaveBeenCalledWith("word1 word2 word3")
+      expect(mockToastShow).not.toHaveBeenCalled()
+    })
+
+    /** useRestoreWallet reports its own failures and drives its status state; the screen
+     *  must swallow the rejection rather than double-report it via the read catch. */
+    it("swallows a rejecting restore after a successful read", async () => {
+      mockRead.mockResolvedValue({
+        success: true,
+        walletIdentifier: "pubkey-1",
+        mnemonic: "word1 word2 word3",
+      })
+      mockRequestRestore.mockRejectedValue(new Error("restore failed"))
+
+      const { getByTestId } = render(
+        <ContextForScreen>
+          <RestoreMethodScreen />
+        </ContextForScreen>,
+      )
+      await flushEffects()
+
+      await act(async () => {
+        fireEvent.press(getByTestId(passwordManagerTestId()))
+      })
+
+      expect(mockRequestRestore).toHaveBeenCalledWith("word1 word2 word3")
+      expect(mockReportError).not.toHaveBeenCalled()
+      expect(mockToastShow).not.toHaveBeenCalled()
+    })
+
+    it("stays silent when the user cancels", async () => {
+      mockRead.mockResolvedValue({ success: false, error: "user-cancelled" })
+
+      const { getByTestId } = render(
+        <ContextForScreen>
+          <RestoreMethodScreen />
+        </ContextForScreen>,
+      )
+      await flushEffects()
+
+      await act(async () => {
+        fireEvent.press(getByTestId(passwordManagerTestId()))
+      })
+
+      expect(mockRequestRestore).not.toHaveBeenCalled()
+      expect(mockToastShow).not.toHaveBeenCalled()
+    })
+
+    it("shows the noBackupFound toast when no provider is configured", async () => {
+      mockRead.mockResolvedValue({ success: false, error: "no-provider" })
+
+      const { getByTestId } = render(
+        <ContextForScreen>
+          <RestoreMethodScreen />
+        </ContextForScreen>,
+      )
+      await flushEffects()
+
+      await act(async () => {
+        fireEvent.press(getByTestId(passwordManagerTestId()))
+      })
+
+      expect(mockToastShow).toHaveBeenCalledWith(
+        expect.objectContaining({ message: LL.RestoreScreen.noBackupFound() }),
+      )
+      expect(mockRequestRestore).not.toHaveBeenCalled()
+    })
+
+    it("shows the noBackupFound toast on unsupported platform", async () => {
+      mockRead.mockResolvedValue({ success: false, error: "unsupported" })
+
+      const { getByTestId } = render(
+        <ContextForScreen>
+          <RestoreMethodScreen />
+        </ContextForScreen>,
+      )
+      await flushEffects()
+
+      await act(async () => {
+        fireEvent.press(getByTestId(passwordManagerTestId()))
+      })
+
+      expect(mockToastShow).toHaveBeenCalledWith(
+        expect.objectContaining({ message: LL.RestoreScreen.noBackupFound() }),
+      )
+    })
+
+    /** The native module can return an error string no CredentialError models; the
+     *  exhaustiveness branch used to throw, which from this un-awaited onPress became an
+     *  unhandled promise rejection. It reports and toasts instead. */
+    it("reports and toasts an unmodelled credential error instead of throwing", async () => {
+      mockRead.mockResolvedValue({ success: false, error: "bogus-new-error" })
+
+      const { getByTestId } = render(
+        <ContextForScreen>
+          <RestoreMethodScreen />
+        </ContextForScreen>,
+      )
+      await flushEffects()
+
+      await act(async () => {
+        fireEvent.press(getByTestId(passwordManagerTestId()))
+      })
+
+      expect(mockReportError).toHaveBeenCalledWith(
+        "Restore credential error unhandled",
+        expect.any(Error),
+        expect.objectContaining({ alwaysRecord: true }),
+      )
+      expect(mockToastShow).toHaveBeenCalledWith(
+        expect.objectContaining({ message: LL.RestoreScreen.restoreFailed() }),
+      )
+      expect(mockRequestRestore).not.toHaveBeenCalled()
+    })
+
+    /** read() itself can reject (native module failure); the async onPress handler must
+     *  not surface that as an unhandled rejection. */
+    it("reports and toasts a rejecting credential read", async () => {
+      mockRead.mockRejectedValue(new Error("keystore unavailable"))
+
+      const { getByTestId } = render(
+        <ContextForScreen>
+          <RestoreMethodScreen />
+        </ContextForScreen>,
+      )
+      await flushEffects()
+
+      await act(async () => {
+        fireEvent.press(getByTestId(passwordManagerTestId()))
+      })
+
+      expect(mockReportError).toHaveBeenCalledWith(
+        "Restore credential read",
+        expect.any(Error),
+      )
+      expect(mockToastShow).toHaveBeenCalledWith(
+        expect.objectContaining({ message: LL.RestoreScreen.restoreFailed() }),
+      )
+      expect(mockRequestRestore).not.toHaveBeenCalled()
+    })
+
+    it("shows the restoreFailed toast on unknown errors", async () => {
+      mockRead.mockResolvedValue({ success: false, error: "unknown" })
+
+      const { getByTestId } = render(
+        <ContextForScreen>
+          <RestoreMethodScreen />
+        </ContextForScreen>,
+      )
+      await flushEffects()
+
+      await act(async () => {
+        fireEvent.press(getByTestId(passwordManagerTestId()))
+      })
+
+      expect(mockToastShow).toHaveBeenCalledWith(
+        expect.objectContaining({ message: LL.RestoreScreen.restoreFailed() }),
+      )
+      expect(mockRequestRestore).not.toHaveBeenCalled()
+    })
+  })
+})

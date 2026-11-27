@@ -1,0 +1,264 @@
+import { ScrollView } from "react-native-gesture-handler"
+import React, { useEffect } from "react"
+import { TouchableOpacity } from "react-native"
+
+import { gql } from "@apollo/client"
+import { makeStyles, Text } from "@rn-vui/themed"
+import { useNavigation } from "@react-navigation/native"
+import { NativeStackNavigationProp } from "@react-navigation/native-stack"
+
+import { GaloyIcon } from "@app/components/atomic/galoy-icon"
+import { headerIconTouchArea, headerRightNoGlass } from "@app/components/header-no-glass"
+import { useEnhancedModePrompt } from "@app/components/enhanced-mode-prompt"
+import {
+  RestrictedRegionBanner,
+  useRestrictedRegion,
+} from "@app/components/restricted-region"
+import { BackupStatus, useBackupState } from "@app/self-custodial/providers/backup-state"
+import { useAccountRegistry } from "@app/hooks/use-account-registry"
+import { useSelfCustodialAccountMode } from "@app/self-custodial/hooks/use-self-custodial-account-mode"
+import { Screen } from "@app/components/screen"
+import { SettingsCard } from "./settings-card"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { VersionComponent } from "@app/components/version"
+import { useIsAuthed } from "@app/graphql/is-authed-context"
+import { useLevel } from "@app/graphql/level-context"
+import { useTwoFactorEnforcement } from "@app/custodial/providers/two-factor-enforcement"
+import { RootStackParamList } from "@app/navigation/stack-param-lists"
+import { useUnacknowledgedNotificationCountQuery } from "@app/graphql/generated"
+import { AccountType } from "@app/types/wallet"
+
+import { AccountBanner } from "./account/banner"
+import { TwoFactorBanner } from "./two-factor-banner"
+import { EmailSetting } from "./account/settings/email"
+import { PhoneSetting } from "./account/settings/phone"
+import { SettingsGroup } from "./group"
+import { DefaultWallet } from "./settings/account-default-wallet"
+import { AccountLevelSetting } from "./settings/account-level"
+import { AccountModeSetting } from "./self-custodial/account-mode"
+import { AccountLNAddress } from "./settings/account-ln-address"
+import { PhoneLnAddress } from "./settings/phone-ln-address"
+import { AccountPOS } from "./settings/account-pos"
+import { AccountDonationButton } from "./settings/account-donation-button"
+import { AccountBtcpay } from "./settings/account-btcpay"
+import { AccountWoocommerce } from "./settings/account-woocommerce"
+import { TxLimits } from "./settings/account-tx-limits"
+import { FeeRatesSetting } from "./settings/fee-rates"
+import { ApiAccessSetting } from "./settings/advanced-api-access"
+import { ExportCsvSetting } from "./settings/advanced-export-csv"
+import { ExportLogsSetting } from "./settings/advanced-export-logs"
+import { JoinCommunitySetting } from "./settings/community-join"
+import { NeedHelpSetting } from "./settings/community-need-help"
+import { CurrencySetting } from "./settings/preferences-currency"
+import { LanguageSetting } from "./settings/preferences-language"
+import { ThemeSetting } from "./settings/preferences-theme"
+import { NotificationSetting } from "./settings/sp-notifications"
+import { OnDeviceSecuritySetting } from "./settings/sp-security"
+import { TotpSetting } from "./totp"
+import { AccountStaticQR } from "./settings/account-static-qr"
+import { MoveToNonCustodialSetting } from "./settings/account-move-to-noncustodial"
+import { SwitchAccountSetting } from "./settings/multi-account"
+import { StableBalanceSetting } from "./settings/stable-balance"
+import { EmergencyBundleSetting } from "./settings/emergency-bundle"
+import { ViewBackupPhraseSetting } from "./settings/view-backup-phrase"
+import { BackupWalletSetting } from "./settings/backup-wallet"
+
+// All queries in settings have to be set here so that the server is not hit with
+// multiple requests for each query
+gql`
+  query UnacknowledgedNotificationCount {
+    me {
+      id
+      unacknowledgedStatefulNotificationsWithoutBulletinEnabledCount
+    }
+  }
+
+  query SettingsScreen {
+    me {
+      id
+      username
+      language
+      defaultAccount {
+        id
+        defaultWalletId
+        wallets {
+          id
+          balance
+          walletCurrency
+        }
+      }
+
+      # Authentication Stuff needed for account screen
+      totpEnabled
+      phone
+      email {
+        address
+        verified
+      }
+    }
+  }
+`
+
+export const SettingsScreen: React.FC = () => {
+  const styles = useStyles()
+  const { LL } = useI18nContext()
+
+  const isAuthed = useIsAuthed()
+  const { isAtLeastLevelOne } = useLevel()
+  const { activeAccount } = useAccountRegistry()
+  const { backupState } = useBackupState()
+  const { data: unackNotificationCount } = useUnacknowledgedNotificationCountQuery({
+    skip: !isAuthed,
+    fetchPolicy: "cache-and-network",
+  })
+
+  const isSelfCustodialMode = activeAccount?.type === AccountType.SelfCustodial
+  const shouldShowSettingsBanner =
+    isSelfCustodialMode && backupState.status !== BackupStatus.Completed
+  const { shouldShowSettingsBanner: shouldShowTwoFactorBanner } =
+    useTwoFactorEnforcement()
+  const { isAnonMode } = useSelfCustodialAccountMode()
+  const { promptEnhancedMode } = useEnhancedModePrompt()
+  const { isRestrictedRegion, presentRestrictedRegionModal } = useRestrictedRegion()
+
+  const isWaysToGetPaidDisabled = isAnonMode || isRestrictedRegion
+  /** Anon comes first: with no lookup running, the region can never read as restricted. */
+  const onWaysToGetPaidDisabledPress = isAnonMode
+    ? promptEnhancedMode
+    : presentRestrictedRegionModal
+
+  const items = {
+    account: [
+      AccountLevelSetting,
+      AccountModeSetting,
+      TxLimits,
+      FeeRatesSetting,
+      SwitchAccountSetting,
+      MoveToNonCustodialSetting,
+    ],
+    waysToGetPaid: [
+      AccountLNAddress,
+      PhoneLnAddress,
+      AccountPOS,
+      AccountStaticQR,
+      AccountDonationButton,
+      AccountBtcpay,
+      AccountWoocommerce,
+    ],
+    loginMethods: [EmailSetting, PhoneSetting],
+    preferences: [
+      NotificationSetting,
+      DefaultWallet,
+      CurrencySetting,
+      LanguageSetting,
+      ThemeSetting,
+      StableBalanceSetting,
+    ],
+    securityAndPrivacy: [
+      TotpSetting,
+      OnDeviceSecuritySetting,
+      ViewBackupPhraseSetting,
+      BackupWalletSetting,
+      EmergencyBundleSetting,
+    ],
+    advanced: [ExportCsvSetting, ExportLogsSetting, ApiAccessSetting],
+    community: [NeedHelpSetting, JoinCommunitySetting],
+  }
+
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>()
+
+  useEffect(() => {
+    const count =
+      unackNotificationCount?.me
+        ?.unacknowledgedStatefulNotificationsWithoutBulletinEnabledCount || 0
+    navigation.setOptions(
+      headerRightNoGlass(() => (
+        <TouchableOpacity
+          style={styles.headerRight}
+          onPress={() => navigation.navigate("notificationHistory")}
+        >
+          <GaloyIcon name="bell" size={24} />
+          {count !== 0 && (
+            <Text
+              type="p4"
+              style={styles.notificationCount}
+              testID="notification-badge"
+            />
+          )}
+        </TouchableOpacity>
+      )),
+    )
+  }, [navigation, styles, unackNotificationCount])
+
+  return (
+    <Screen keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={styles.outer}>
+        {isRestrictedRegion && <RestrictedRegionBanner />}
+        <AccountBanner />
+        {shouldShowSettingsBanner && (
+          <SettingsCard
+            title={LL.BackupNudge.title()}
+            description={LL.BackupNudge.settingsWarning()}
+            onPress={() => navigation.navigate("selfCustodialBackupMethod")}
+            borderColor="accent"
+            titleColor="accent"
+          />
+        )}
+        {shouldShowTwoFactorBanner && <TwoFactorBanner />}
+        <SettingsGroup name={LL.common.account()} items={items.account} />
+        <SettingsGroup
+          name={LL.SettingsScreen.addressScreen()}
+          items={items.waysToGetPaid}
+          disabled={isWaysToGetPaidDisabled}
+          onDisabledPress={onWaysToGetPaidDisabledPress}
+        />
+        {isAtLeastLevelOne && !isSelfCustodialMode && (
+          <SettingsGroup
+            name={LL.AccountScreen.loginMethods()}
+            items={items.loginMethods}
+          />
+        )}
+        <SettingsGroup name={LL.common.preferences()} items={items.preferences} />
+        <SettingsGroup
+          name={LL.common.securityAndPrivacy()}
+          items={items.securityAndPrivacy}
+        />
+        {/* Rows gate themselves by account type (CSV export branches, logs are
+            self-custodial-only, API access is custodial-only) and SettingsGroup
+            collapses when every row returns null. */}
+        <SettingsGroup name={LL.common.advanced()} items={items.advanced} />
+        <SettingsGroup name={LL.common.support()} items={items.community} />
+        <VersionComponent />
+      </ScrollView>
+    </Screen>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  outer: {
+    marginTop: 5,
+    paddingHorizontal: 12,
+    paddingBottom: 20,
+    display: "flex",
+    flexDirection: "column",
+    rowGap: 18,
+  },
+  // The 48dp box centres the 24dp bell, 12dp in from each edge: the margin and the
+  // badge offsets are the old ones less those 12dp, so neither moves.
+  headerRight: {
+    ...headerIconTouchArea,
+    marginRight: 0,
+  },
+  notificationCount: {
+    position: "absolute",
+    right: 9,
+    top: 9,
+    backgroundColor: colors.textOnBackground,
+    textAlign: "center",
+    verticalAlign: "middle",
+    height: 14,
+    width: 14,
+    borderRadius: 9,
+    overflow: "hidden",
+  },
+}))

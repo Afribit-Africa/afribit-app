@@ -1,0 +1,62 @@
+import React from "react"
+import { ActivityIndicator, View } from "react-native"
+
+import { makeStyles, Text } from "@rn-vui/themed"
+
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { fonts } from "@app/rne-theme/fonts"
+import { staticSurface } from "@app/rne-theme/surfaces"
+
+type Props = {
+  feeText: string
+  isLoading: boolean
+  hasError: boolean
+}
+
+export const ConversionFeeRow: React.FC<Props> = ({ feeText, isLoading, hasError }) => {
+  const styles = useStyles()
+  const { LL } = useI18nContext()
+
+  const valueText = hasError ? LL.ConversionConfirmationScreen.feeError() : feeText
+
+  return (
+    <View style={styles.card}>
+      {isLoading ? (
+        <ActivityIndicator />
+      ) : (
+        <View style={styles.row}>
+          <Text style={styles.label}>{LL.ConversionConfirmationScreen.feeLabel()}</Text>
+          <Text style={[styles.value, hasError && styles.errorValue]}>{valueText}</Text>
+        </View>
+      )}
+    </View>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  card: {
+    marginHorizontal: 20,
+    marginBottom: 10,
+    ...staticSurface(colors),
+    borderRadius: 13,
+    padding: 20,
+  },
+  row: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  label: {
+    color: colors.textMuted,
+    fontSize: 14,
+    fontFamily: fonts.bold,
+  },
+  value: {
+    color: colors.textSecondary,
+    fontSize: 14,
+    fontFamily: fonts.bold,
+  },
+  errorValue: {
+    color: colors.error,
+  },
+}))

@@ -1,0 +1,359 @@
+import {
+  createClaimDeposit,
+  createListPendingDeposits,
+  parseDepositId,
+} from "@app/self-custodial/adapters/deposit"
+import { DepositClaimDeferral, DepositErrorReason } from "@app/types/payment"
+
+const mockListDeposits = jest.fn()
+const mockClaimDeposit = jest.fn()
+const mockRefundDeposit = jest.fn()
+
+jest.mock("@app/self-custodial/bridge", () => ({
+  listDeposits: (...args: unknown[]) => mockListDeposits(...args),
+  claimDeposit: (...args: unknown[]) => mockClaimDeposit(...args),
+  refundDeposit: (...args: unknown[]) => mockRefundDeposit(...args),
+}))
+
+const mockSdk = {} as never
+
+describe("createListPendingDeposits", () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it("returns mapped deposits", async () => {
+    mockListDeposits.mockResolvedValue([
+      {
+        txid: "abc",
+        vout: 0,
+        amountSats: 5000,
+        isMature: true,
+        claimError: null,
+        hasRefund: false,
+      },
+    ])
+
+    const list = createListPendingDeposits(mockSdk)
+    const result = await list()
+
+    expect(result.deposits).toHaveLength(1)
+    expect(result.deposits[0].id).toBe("abc:0")
+    expect(result.deposits[0].status).toBe("claimable")
+  })
+
+  it("leaves out deposits claimed early that the balance already holds", async () => {
+    const early = (txid: string, earlyClaim: string, isMature = false) => ({
+      txid,
+      vout: 0,
+      amountSats: 3000,
+      isMature,
+      claimError: null,
+      hasRefund: false,
+      earlyClaim,
+    })
+    mockListDeposits.mockResolvedValue([
+      early("credited", "credited"),
+      early("settling", "settling"),
+      early("settling-mature", "settling", true),
+      early("waiting", "none"),
+    ])
+
+    const result = await createListPendingDeposits(mockSdk)()
+
+    expect(result.deposits.map(({ id, status }) => [id, status])).toEqual([
+      ["settling:0", "claiming"],
+      ["settling-mature:0", "claiming"],
+      ["waiting:0", "immature"],
+    ])
+  })
+
+  it("returns immature status for unconfirmed deposits", async () => {
+    mockListDeposits.mockResolvedValue([
+      {
+        txid: "def",
+        vout: 1,
+        amountSats: 3000,
+        isMature: false,
+        claimError: null,
+        hasRefund: false,
+      },
+    ])
+
+    const list = createListPendingDeposits(mockSdk)
+    const result = await list()
+
+    expect(result.deposits[0].status).toBe("immature")
+  })
+
+  it("returns fee_exceeded status", async () => {
+    mockListDeposits.mockResolvedValue([
+      {
+        txid: "ghi",
+        vout: 0,
+        amountSats: 1000,
+        isMature: true,
+        claimError: { reason: "fee_exceeded", requiredFeeSats: 800 },
+        hasRefund: false,
+      },
+    ])
+
+    const list = createListPendingDeposits(mockSdk)
+    const result = await list()
+
+    expect(result.deposits[0].status).toBe("fee_exceeded")
+    expect(result.deposits[0].errorReason).toBe("fee_exceeded")
+    expect(result.deposits[0].requiredFeeSats).toBe(800)
+  })
+
+  it("returns refunded status", async () => {
+    mockListDeposits.mockResolvedValue([
+      {
+        txid: "jkl",
+        vout: 0,
+        amountSats: 2000,
+        isMature: true,
+        claimError: null,
+        hasRefund: true,
+      },
+    ])
+
+    const list = createListPendingDeposits(mockSdk)
+    const result = await list()
+
+    expect(result.deposits[0].status).toBe("refunded")
+  })
+
+  it("returns errors on failure", async () => {
+    mockListDeposits.mockRejectedValue(new Error("SDK error"))
+
+    const list = createListPendingDeposits(mockSdk)
+    const result = await list()
+
+    expect(result.deposits).toHaveLength(0)
+    expect(result.errors).toHaveLength(1)
+  })
+})
+
+describe("createClaimDeposit", () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it("claims deposit successfully", async () => {
+    mockClaimDeposit.mockResolvedValue({ status: "settled" })
+
+    const adapter = createClaimDeposit(mockSdk)
+    const result = await adapter.claimDeposit({ depositId: "abc:0" })
+
+    expect(result.status).toBe("success")
+    expect(mockClaimDeposit).toHaveBeenCalledWith(
+      expect.objectContaining({ txid: "abc", vout: 0 }),
+    )
+  })
+
+  it("reports an early claim that was submitted as pending, not claimed", async () => {
+    mockClaimDeposit.mockResolvedValue({ status: "submitted" })
+
+    const result = await createClaimDeposit(mockSdk).claimDeposit({ depositId: "abc:0" })
+
+    expect(result).toEqual({ status: "pending" })
+  })
+
+  it("fails a claim deferred over the fee cap, carrying the fee it needs", async () => {
+    mockClaimDeposit.mockResolvedValue({
+      status: "deferred",
+      reason: "fee_exceeded",
+      requiredFeeSats: 420,
+    })
+
+    const result = await createClaimDeposit(mockSdk).claimDeposit({ depositId: "abc:0" })
+
+    expect(result.status).toBe("failed")
+    expect(result.deferral).toBe(DepositClaimDeferral.FeeExceeded)
+    expect(result.requiredFeeSats).toBe(420)
+  })
+
+  it("fails a claim deferred until the deposit confirms", async () => {
+    mockClaimDeposit.mockResolvedValue({
+      status: "deferred",
+      reason: "awaiting_confirmations",
+    })
+
+    const result = await createClaimDeposit(mockSdk).claimDeposit({ depositId: "abc:0" })
+
+    expect(result.status).toBe("failed")
+    expect(result.deferral).toBe(DepositClaimDeferral.AwaitingConfirmations)
+  })
+
+  it("fails a claim the provider declined, with its message", async () => {
+    mockClaimDeposit.mockResolvedValue({
+      status: "deferred",
+      reason: "provider_declined",
+      message: "quote expired",
+    })
+
+    const result = await createClaimDeposit(mockSdk).claimDeposit({ depositId: "abc:0" })
+
+    expect(result.status).toBe("failed")
+    expect(result.deferral).toBe(DepositClaimDeferral.ProviderDeclined)
+    expect(result.errors?.[0].message).toBe("quote expired")
+  })
+
+  it("reports a claim the SDK is already running as pending, not failed", async () => {
+    mockClaimDeposit.mockRejectedValue({
+      tag: "DepositClaimInProgress",
+      inner: { tx: "abc", vout: 0 },
+    })
+
+    const result = await createClaimDeposit(mockSdk).claimDeposit({ depositId: "abc:0" })
+
+    expect(result).toEqual({ status: "pending" })
+  })
+
+  it("reports a deposit too small to claim after fees as below dust", async () => {
+    mockClaimDeposit.mockRejectedValue({
+      tag: "DepositTooSmall",
+      inner: { tx: "abc", vout: 0, docsUrl: "" },
+    })
+
+    const result = await createClaimDeposit(mockSdk).claimDeposit({ depositId: "abc:0" })
+
+    expect(result.status).toBe("failed")
+    expect(result.errorReason).toBe(DepositErrorReason.BelowDust)
+  })
+
+  it("returns failed on error", async () => {
+    mockClaimDeposit.mockRejectedValue(new Error("claim failed"))
+
+    const adapter = createClaimDeposit(mockSdk)
+    const result = await adapter.claimDeposit({ depositId: "abc:0" })
+
+    expect(result.status).toBe("failed")
+    expect(result.errors?.[0].message).toContain("claim failed")
+  })
+
+  it("refunds deposit successfully", async () => {
+    mockRefundDeposit.mockResolvedValue(undefined)
+
+    const adapter = createClaimDeposit(mockSdk)
+    const result = await adapter.refundDeposit({
+      depositId: "abc:0",
+      destinationAddress: "bc1q...",
+      feeRateSatPerVb: 3,
+    })
+
+    expect(result.status).toBe("success")
+  })
+
+  it("returns failed on refund error", async () => {
+    mockRefundDeposit.mockRejectedValue(new Error("refund failed"))
+
+    const adapter = createClaimDeposit(mockSdk)
+    const result = await adapter.refundDeposit({
+      depositId: "abc:0",
+      destinationAddress: "bc1q...",
+      feeRateSatPerVb: 3,
+    })
+
+    expect(result.status).toBe("failed")
+    expect(result.errors?.[0].message).toContain("refund failed")
+  })
+
+  describe("malformed depositId guards", () => {
+    beforeEach(() => jest.clearAllMocks())
+
+    const malformed = [
+      "",
+      ":",
+      "no-colon",
+      ":0",
+      "abc:",
+      "abc:notnum",
+      "abc:-1",
+      "abc:1.5",
+    ]
+
+    for (const bad of malformed) {
+      it(`claimDeposit refuses to call SDK for "${bad}"`, async () => {
+        const adapter = createClaimDeposit(mockSdk)
+        const result = await adapter.claimDeposit({ depositId: bad })
+
+        expect(result.status).toBe("failed")
+        expect(mockClaimDeposit).not.toHaveBeenCalled()
+      })
+
+      it(`refundDeposit refuses to call SDK for "${bad}"`, async () => {
+        const adapter = createClaimDeposit(mockSdk)
+        const result = await adapter.refundDeposit({
+          depositId: bad,
+          destinationAddress: "bc1q...",
+          feeRateSatPerVb: 3,
+        })
+
+        expect(result.status).toBe("failed")
+        expect(mockRefundDeposit).not.toHaveBeenCalled()
+      })
+    }
+  })
+
+  describe("getClaimFee (I11 — null instead of misleading 0)", () => {
+    beforeEach(() => jest.clearAllMocks())
+
+    it("returns null even when the deposit exists, until SDK exposes a real quote", async () => {
+      mockListDeposits.mockResolvedValue([
+        {
+          txid: "abc",
+          vout: 0,
+          amountSats: 5000,
+          isMature: true,
+          claimError: null,
+          hasRefund: false,
+        },
+      ])
+
+      const adapter = createClaimDeposit(mockSdk)
+      const result = await adapter.getClaimFee({ depositId: "abc:0" })
+
+      expect(result).toBeNull()
+    })
+
+    it("returns null for a malformed depositId without hitting the SDK", async () => {
+      const adapter = createClaimDeposit(mockSdk)
+      const result = await adapter.getClaimFee({ depositId: "garbage" })
+
+      expect(result).toBeNull()
+      expect(mockListDeposits).not.toHaveBeenCalled()
+    })
+  })
+})
+
+describe("parseDepositId", () => {
+  it("parses a well-formed txid:vout pair", () => {
+    expect(parseDepositId("abc123:0")).toEqual({ txid: "abc123", vout: 0 })
+  })
+
+  it("supports vouts > 0", () => {
+    expect(parseDepositId("abc123:42")).toEqual({ txid: "abc123", vout: 42 })
+  })
+
+  it("returns null for missing colon", () => {
+    expect(parseDepositId("abc123")).toBeNull()
+  })
+
+  it("returns null for empty txid", () => {
+    expect(parseDepositId(":0")).toBeNull()
+  })
+
+  it("returns null for empty vout", () => {
+    expect(parseDepositId("abc123:")).toBeNull()
+  })
+
+  it("returns null for non-numeric vout", () => {
+    expect(parseDepositId("abc:notnum")).toBeNull()
+  })
+
+  it("returns null for negative vout", () => {
+    expect(parseDepositId("abc:-1")).toBeNull()
+  })
+
+  it("returns null for fractional vout", () => {
+    expect(parseDepositId("abc:1.5")).toBeNull()
+  })
+})

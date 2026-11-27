@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "ai",
+  "displayName": { "en": "Afribit AI", "sw": "Afribit AI" },
+  "tagline": { "en": "Ask questions in English, Kiswahili or Sheng.", "sw": "Uliza maswali kwa Kiingereza, Kiswahili au Sheng." },
+  "version": "0.1.0",
+  "owner": "afribit-africa",
+  "license": "internal-owned",
+  "classification": "B",
+  "kind": "native",
+  "readiness": "coming-later",
+  "category": "tools",
+  "requires": { "network": "internet", "account": false },
+  "requestedCapabilities": ["app.openService"],
+  "networkDomains": [],
+  "isolation": { "process": "shell", "storageNamespace": "feature.ai" },
+  "minimumHostContract": "1.0"
+}

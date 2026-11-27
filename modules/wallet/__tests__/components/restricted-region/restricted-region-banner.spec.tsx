@@ -1,0 +1,63 @@
+import React from "react"
+
+import { render } from "@testing-library/react-native"
+import { ThemeProvider, useTheme } from "@rn-vui/themed"
+import TypesafeI18n from "@app/i18n/i18n-react"
+import { i18nObject } from "@app/i18n/i18n-util"
+import { loadLocale } from "@app/i18n/i18n-util.sync"
+import theme from "@app/rne-theme/theme"
+
+jest.mock("@app/utils/ip-country-lookup")
+
+import { RestrictedRegionBanner } from "@app/components/restricted-region"
+
+loadLocale("en")
+const LL = i18nObject("en")
+
+/** Reads the palette from inside the same provider the banner renders under, so the
+ *  colour assertions follow the theme instead of hardcoding hexes. */
+let themeColors: { accent: string; surfaceStatic: string } | undefined
+const ThemeProbe: React.FC = () => {
+  themeColors = useTheme().theme.colors
+  return null
+}
+
+const palette = () => {
+  if (!themeColors) throw new Error("theme probe did not render")
+  return themeColors
+}
+
+const renderBanner = () =>
+  render(
+    <ThemeProvider theme={theme}>
+      <TypesafeI18n locale="en">
+        <ThemeProbe />
+        <RestrictedRegionBanner />
+      </TypesafeI18n>
+    </ThemeProvider>,
+  )
+
+describe("RestrictedRegionBanner", () => {
+  it("shows the fixed copy", () => {
+    const { getByText, getByTestId } = renderBanner()
+
+    expect(getByTestId("restricted-region-banner")).toBeTruthy()
+    expect(getByText(LL.RestrictedRegion.title())).toBeTruthy()
+    expect(
+      getByText(`${LL.RestrictedRegion.body()}\n\n${LL.RestrictedRegion.bodyReturn()}`),
+    ).toBeTruthy()
+  })
+
+  /** Shares the backup nudge's accent border, but nothing on it is tappable, so it
+   *  takes the surfaceStatic fill where the nudge, a SettingsCard, keeps surfaceInteractive. */
+  it("wears the accent border on the surfaceStatic fill", () => {
+    const { getByTestId, getByText } = renderBanner()
+    const { accent, surfaceStatic } = palette()
+
+    expect(getByTestId("restricted-region-banner")).toHaveStyle({
+      borderColor: accent,
+      backgroundColor: surfaceStatic,
+    })
+    expect(getByText(LL.RestrictedRegion.title())).toHaveStyle({ color: accent })
+  })
+})

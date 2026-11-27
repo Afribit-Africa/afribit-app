@@ -1,0 +1,307 @@
+import { WalletCurrency } from "@app/graphql/generated"
+
+import { MoneyAmount, UsdMoneyAmount } from "./amounts"
+
+export type PaymentError = {
+  message: string
+  code?: string
+  reason?: string
+}
+
+export const PaymentResultStatus = {
+  Success: "success",
+  Failed: "failed",
+  Pending: "pending",
+} as const
+
+export type PaymentResultStatus =
+  (typeof PaymentResultStatus)[keyof typeof PaymentResultStatus]
+
+export type PaymentAdapterResult = {
+  status: PaymentResultStatus
+  errors?: PaymentError[]
+  /** For a conversion that went through: the payment it delivered, when known. */
+  deliveredPaymentId?: string
+  extraInfo?: {
+    arrivalAtMempoolEstimate?: number
+    preimage?: string | null
+  }
+}
+
+export const FeeTier = {
+  Slow: "slow",
+  Medium: "medium",
+  Fast: "fast",
+} as const
+
+export type FeeTier = (typeof FeeTier)[keyof typeof FeeTier]
+
+export const FEE_TIER_ETA_MINUTES = {
+  fast: 10,
+  medium: 30,
+  slow: 60,
+} as const
+
+export type SendPaymentParams = {
+  destination: string
+  amount?: MoneyAmount<WalletCurrency>
+  memo?: string
+  feeTier?: FeeTier
+}
+
+export type ReceiveLightningParams = {
+  amount?: MoneyAmount<WalletCurrency>
+  memo?: string
+  /** Invoice lifetime in seconds. Omitted, the SDK applies its own default. */
+  expirySecs?: number
+}
+
+export const FeeQuoteType = {
+  Lightning: "lightning",
+  Onchain: "onchain",
+  Claim: "claim",
+} as const
+
+export type FeeQuoteType = (typeof FeeQuoteType)[keyof typeof FeeQuoteType]
+
+export const FeeMode = {
+  PaySeparately: "pay_separately",
+} as const
+
+export type FeeMode = (typeof FeeMode)[keyof typeof FeeMode]
+
+export type FeeQuote =
+  | {
+      paymentType: typeof FeeQuoteType.Lightning
+      feeAmount: MoneyAmount<WalletCurrency>
+      errors?: PaymentError[]
+    }
+  | {
+      paymentType: typeof FeeQuoteType.Onchain
+      feeAmount: MoneyAmount<WalletCurrency>
+      feeTier: FeeTier
+      feeMode: FeeMode
+      recipientAmount: MoneyAmount<WalletCurrency>
+      totalDebited: MoneyAmount<WalletCurrency>
+      confirmationEtaMinutes?: number
+      errors?: PaymentError[]
+    }
+  | {
+      paymentType: typeof FeeQuoteType.Claim
+      feeAmount: MoneyAmount<WalletCurrency>
+      errors?: PaymentError[]
+    }
+
+export const DepositStatus = {
+  Immature: "immature",
+  /** Claimed early (0.26) but not yet in the balance: still pending, nothing to do. */
+  Claiming: "claiming",
+  Claimable: "claimable",
+  FeeExceeded: "fee_exceeded",
+  Error: "error",
+  Refunded: "refunded",
+} as const
+
+export type DepositStatus = (typeof DepositStatus)[keyof typeof DepositStatus]
+
+export const DepositErrorReason = {
+  FeeExceeded: "fee_exceeded",
+  MissingUtxo: "missing_utxo",
+  BelowDust: "below_dust",
+  Generic: "generic",
+} as const
+
+export type DepositErrorReason =
+  (typeof DepositErrorReason)[keyof typeof DepositErrorReason]
+
+/** Why a claim the SDK accepted did not claim yet (0.26 returns these instead of throwing). */
+export const DepositClaimDeferral = {
+  FeeExceeded: "fee_exceeded",
+  AwaitingConfirmations: "awaiting_confirmations",
+  ProviderDeclined: "provider_declined",
+} as const
+
+export type DepositClaimDeferral =
+  (typeof DepositClaimDeferral)[keyof typeof DepositClaimDeferral]
+
+export type ClaimDepositResult = PaymentAdapterResult & {
+  deferral?: DepositClaimDeferral
+  requiredFeeSats?: number
+  errorReason?: DepositErrorReason
+}
+
+export type PendingDeposit = {
+  id: string
+  txid: string
+  vout: number
+  amount: MoneyAmount<WalletCurrency>
+  status: DepositStatus
+  errorReason: DepositErrorReason | null
+  requiredFeeSats?: number
+  errorMessage?: string
+}
+
+export type ClaimDepositParams = {
+  depositId: string
+  maxFeeSats?: number
+}
+
+export type RefundDepositParams = {
+  depositId: string
+  destinationAddress: string
+  feeRateSatPerVb: number
+}
+
+export const ConvertDirection = {
+  BtcToUsd: "btc_to_usd",
+  UsdToBtc: "usd_to_btc",
+} as const
+
+export type ConvertDirection = (typeof ConvertDirection)[keyof typeof ConvertDirection]
+
+export const convertDirectionFromCurrency = (
+  fromCurrency: WalletCurrency,
+): ConvertDirection =>
+  fromCurrency === WalletCurrency.Btc
+    ? ConvertDirection.BtcToUsd
+    : ConvertDirection.UsdToBtc
+
+export const oppositeWalletCurrency = (currency: WalletCurrency): WalletCurrency =>
+  currency === WalletCurrency.Btc ? WalletCurrency.Usd : WalletCurrency.Btc
+
+export type ConvertSource = "manual" | "auto_convert"
+
+export type ConvertParams = {
+  fromAmount: MoneyAmount<WalletCurrency>
+  toAmount: MoneyAmount<WalletCurrency>
+  direction: ConvertDirection
+  /** Telemetry only: whether the user drove the swap or the auto-convert rule did. */
+  source?: ConvertSource
+  /** For auto-convert: when the receive it converts was recorded, which tells that
+   *  receive's conversion from another receive's of about the same amount. */
+  receiveRecordedAtMs?: number
+}
+
+export type ConversionLimits = {
+  minFromAmount: number | null
+  minToAmount: number | null
+}
+
+export const ConvertErrorCode = {
+  BelowMinimum: "below_minimum",
+  LimitsUnavailable: "limits_unavailable",
+  /** A conversion threw after it was dispatched and its payment could not be found, so
+   *  it may have gone through: no further conversion is sent until the user has checked. */
+  OutcomeUnknown: "outcome_unknown",
+  /** Nothing was converted: an earlier conversion that may have been lost can still
+   *  deliver, so none goes out until it turns up or the time it could take has passed. */
+  EarlierConversionPending: "earlier_conversion_pending",
+  /** Nothing was converted: what the wallet's history or its earlier conversions hold
+   *  could not be read, and a conversion that went out without it could not be told
+   *  apart from what came before. */
+  HistoryUnavailable: "history_unavailable",
+  /** Nothing was converted: an earlier conversion that may have been lost turned out to
+   *  have gone through, for another amount or the other way, and is the user's to check. */
+  EarlierConversionFound: "earlier_conversion_found",
+  /** Nothing was delivered: the SDK answered that the conversion failed, which settles
+   *  it, so it can be tried again. */
+  ConversionFailed: "conversion_failed",
+  /** Nothing was converted: what it was to convert was converted while it waited for its
+   *  turn in the wallet; for the user's own, by a conversion of about its amount, and they
+   *  confirm it again. */
+  AlreadyConverted: "already_converted",
+} as const
+
+export type ConvertErrorCode = (typeof ConvertErrorCode)[keyof typeof ConvertErrorCode]
+
+export type SendPaymentAdapter = (
+  params: SendPaymentParams,
+) => Promise<PaymentAdapterResult>
+
+export type GetFeeAdapter = (params: SendPaymentParams) => Promise<FeeQuote | null>
+
+export type ReceiveLightningAdapter = (params: ReceiveLightningParams) => Promise<{
+  invoice?: string
+  errors?: PaymentError[]
+}>
+
+export type LnurlWithdrawParams = {
+  amountSats: number
+  callback: string
+  k1: string
+  defaultDescription: string
+  minWithdrawableMsats: number
+  maxWithdrawableMsats: number
+  completionTimeoutSecs?: number
+  signal?: AbortSignal
+}
+
+export type LnurlWithdrawAdapter = (
+  params: LnurlWithdrawParams,
+) => Promise<PaymentAdapterResult>
+
+export type ReceiveOnchainParams = {
+  /**
+   * Rotate to a fresh deposit address instead of reusing the existing one.
+   *
+   * Rotating never strands funds: the Spark SDK keeps every address it has issued
+   * under watch, with no documented gap limit. "All previously generated addresses
+   * remain monitored" —
+   * https://sdk-doc-spark.breez.technology/guide/receive_payment.html
+   */
+  newAddress?: boolean
+}
+
+export type ReceiveOnchainAdapter = (params?: ReceiveOnchainParams) => Promise<{
+  address?: string
+  errors?: PaymentError[]
+}>
+
+export type ListPendingDepositsAdapter = () => Promise<{
+  deposits: PendingDeposit[]
+  errors?: PaymentError[]
+}>
+
+export type ClaimDepositAdapter = {
+  getClaimFee: (params: ClaimDepositParams) => Promise<FeeQuote | null>
+  claimDeposit: (params: ClaimDepositParams) => Promise<ClaimDepositResult>
+  refundDeposit: (params: RefundDepositParams) => Promise<PaymentAdapterResult>
+}
+
+export type ConvertAdapter = (params: ConvertParams) => Promise<PaymentAdapterResult>
+
+export const ConvertAmountAdjustment = {
+  FlooredToMin: "floored_to_min",
+  IncreasedToAvoidDust: "increased_to_avoid_dust",
+} as const
+
+export type ConvertAmountAdjustment =
+  (typeof ConvertAmountAdjustment)[keyof typeof ConvertAmountAdjustment]
+
+/** Only IncreasedToAvoidDust blocks: FlooredToMin is a benign SDK floor, and a full-balance send leaves no remainder to sweep. Shared by Convert and Send. */
+export const resolveDustAdjustment = (
+  amountAdjustment: ConvertAmountAdjustment | null,
+  amountInSourceCurrency: number,
+  fromWalletBalance: number | undefined,
+): ConvertAmountAdjustment | null => {
+  if (amountAdjustment !== ConvertAmountAdjustment.IncreasedToAvoidDust) return null
+  if (fromWalletBalance === undefined) return amountAdjustment
+  return amountInSourceCurrency >= fromWalletBalance ? null : amountAdjustment
+}
+
+/** How a quoted conversion goes out. `isConvertedMeanwhile` is asked once its turn in the
+ *  wallet has come, right before it goes out: true when what it is to convert was
+ *  converted while it waited. A throw converts nothing either. */
+export type ConvertExecuteOptions = {
+  isConvertedMeanwhile?: () => Promise<boolean>
+}
+
+export type ConvertQuote = {
+  feeAmount: UsdMoneyAmount
+  amountAdjustment?: ConvertAmountAdjustment
+  execute: (options?: ConvertExecuteOptions) => Promise<PaymentAdapterResult>
+}
+
+export type GetConversionQuoteAdapter = (
+  params: ConvertParams,
+) => Promise<ConvertQuote | null>

@@ -1,0 +1,383 @@
+import { Network, defaultExternalSigners } from "@breeztech/breez-sdk-spark-react-native"
+
+import {
+  checkLightningAddressAvailable,
+  deriveWalletIdentityPubkey,
+  getUserSettings,
+  getWalletInfo,
+  listAllPayments,
+  listPayments,
+  listReceivedPaymentsOldestFirst,
+  listReceivedPaymentsSince,
+  listSentPaymentsSince,
+  registerLightningAddress,
+  syncSelfCustodialWallet,
+} from "@app/self-custodial/bridge/wallet"
+
+const mockReportError = jest.fn()
+
+jest.mock("@app/utils/error-logging", () => ({
+  reportError: (...args: unknown[]) => mockReportError(...args),
+}))
+
+describe("deriveWalletIdentityPubkey", () => {
+  const mockSigners = (getIdentityPublicKey: jest.Mock) => {
+    const breezDestroy = jest.fn()
+    const sparkDestroy = jest.fn()
+    ;(defaultExternalSigners as jest.Mock).mockReturnValue({
+      breezSigner: { uniffiDestroy: breezDestroy },
+      sparkSigner: { getIdentityPublicKey, uniffiDestroy: sparkDestroy },
+    })
+    return { breezDestroy, sparkDestroy }
+  }
+
+  it("derives the identity pubkey offline from the mnemonic and frees both signers", async () => {
+    const { breezDestroy, sparkDestroy } = mockSigners(
+      jest.fn().mockResolvedValue({ bytes: Uint8Array.from([0x02, 0xab, 0xff]).buffer }),
+    )
+
+    const pubkey = await deriveWalletIdentityPubkey(
+      "youth indicate void",
+      Network.Regtest,
+    )
+
+    expect(pubkey).toBe("02abff")
+    expect(defaultExternalSigners).toHaveBeenCalledWith(
+      "youth indicate void",
+      undefined,
+      Network.Regtest,
+      undefined,
+    )
+    expect(breezDestroy).toHaveBeenCalledTimes(1)
+    expect(sparkDestroy).toHaveBeenCalledTimes(1)
+  })
+
+  it("frees both signers even when reading the pubkey rejects, and propagates the error", async () => {
+    const { breezDestroy, sparkDestroy } = mockSigners(
+      jest.fn().mockRejectedValue(new Error("read failed")),
+    )
+
+    await expect(deriveWalletIdentityPubkey("m", Network.Regtest)).rejects.toThrow(
+      "read failed",
+    )
+    expect(breezDestroy).toHaveBeenCalledTimes(1)
+    expect(sparkDestroy).toHaveBeenCalledTimes(1)
+  })
+
+  it("still frees the second signer and returns the pubkey when the first destroy throws", async () => {
+    const { breezDestroy, sparkDestroy } = mockSigners(
+      jest.fn().mockResolvedValue({ bytes: Uint8Array.from([0x02, 0xab, 0xff]).buffer }),
+    )
+    breezDestroy.mockImplementation(() => {
+      throw new Error("already freed")
+    })
+
+    await expect(deriveWalletIdentityPubkey("m", Network.Regtest)).resolves.toBe("02abff")
+    expect(sparkDestroy).toHaveBeenCalledTimes(1)
+  })
+
+  /** A binding that no longer carries the lifecycle method throws the same way an
+   *  already-freed signer does, and that case leaves key material resident: swallowing it
+   *  would hide the one failure this call exists to prevent. */
+  it("reports a destroy failure instead of swallowing it", async () => {
+    const { breezDestroy } = mockSigners(
+      jest.fn().mockResolvedValue({ bytes: Uint8Array.from([0x02, 0xab, 0xff]).buffer }),
+    )
+    const destroyError = new Error("uniffiDestroy is not a function")
+    breezDestroy.mockImplementation(() => {
+      throw destroyError
+    })
+
+    await deriveWalletIdentityPubkey("m", Network.Regtest)
+
+    expect(mockReportError).toHaveBeenCalledWith("destroySigner", destroyError)
+  })
+
+  it("does not let a throwing destroy mask the original rejection", async () => {
+    const { breezDestroy, sparkDestroy } = mockSigners(
+      jest.fn().mockRejectedValue(new Error("read failed")),
+    )
+    breezDestroy.mockImplementation(() => {
+      throw new Error("already freed")
+    })
+
+    await expect(deriveWalletIdentityPubkey("m", Network.Regtest)).rejects.toThrow(
+      "read failed",
+    )
+    expect(sparkDestroy).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * A sync cannot be cancelled, so a caller that gives up leaves it running. Starting a
+ * second one then buys nothing — the SDK serializes them anyway — and costs another native
+ * future, so callers share whichever is already in flight.
+ */
+describe("syncSelfCustodialWallet", () => {
+  const pendingSdk = () => {
+    let settle: (value: unknown) => void = () => undefined
+    const syncWallet = jest.fn(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve
+        }),
+    )
+    return { sdk: { syncWallet } as never, syncWallet, settle: () => settle({}) }
+  }
+
+  it("hands a second caller the sync already running", () => {
+    const { sdk, syncWallet } = pendingSdk()
+
+    const first = syncSelfCustodialWallet(sdk)
+    const second = syncSelfCustodialWallet(sdk)
+
+    expect(second).toBe(first)
+    expect(syncWallet).toHaveBeenCalledTimes(1)
+  })
+
+  it("starts a sync of its own once the shared one has settled", async () => {
+    const { sdk, syncWallet, settle } = pendingSdk()
+
+    const first = syncSelfCustodialWallet(sdk)
+    settle()
+    await first
+
+    syncSelfCustodialWallet(sdk)
+
+    expect(syncWallet).toHaveBeenCalledTimes(2)
+  })
+
+  /** A failed sync is finished too: the next caller must not be handed the failure. */
+  it("starts a sync of its own once the shared one has failed", async () => {
+    const offline = new Error("no connection")
+    const syncWallet = jest.fn().mockRejectedValueOnce(offline).mockResolvedValueOnce({})
+    const sdk = { syncWallet } as never
+
+    await expect(syncSelfCustodialWallet(sdk)).rejects.toThrow(offline)
+    await syncSelfCustodialWallet(sdk)
+
+    expect(syncWallet).toHaveBeenCalledTimes(2)
+  })
+
+  /** Keyed by the wallet, so another account's sync is never handed this one's. */
+  it("keeps each wallet's sync to itself", () => {
+    const one = pendingSdk()
+    const other = pendingSdk()
+
+    syncSelfCustodialWallet(one.sdk)
+    syncSelfCustodialWallet(other.sdk)
+
+    expect(one.syncWallet).toHaveBeenCalledTimes(1)
+    expect(other.syncWallet).toHaveBeenCalledTimes(1)
+  })
+
+  /** The sync that replaces a settled one is shared in its turn. */
+  it("shares the next sync too", async () => {
+    const wallet = pendingSdk()
+    const started = syncSelfCustodialWallet(wallet.sdk)
+    wallet.settle()
+    await started
+
+    const second = syncSelfCustodialWallet(wallet.sdk)
+    const third = syncSelfCustodialWallet(wallet.sdk)
+
+    expect(third).toBe(second)
+    expect(wallet.syncWallet).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("getWalletInfo", () => {
+  it("calls sdk.getInfo with ensureSynced:false so startup does not block on SDK sync", () => {
+    const getInfo = jest.fn().mockResolvedValue({ balanceSats: 0 })
+
+    getWalletInfo({ getInfo } as never)
+
+    expect(getInfo).toHaveBeenCalledWith({ ensureSynced: false })
+  })
+})
+
+describe("listPayments", () => {
+  it("forwards offset and limit with all filters unset", () => {
+    const listPaymentsFn = jest.fn().mockResolvedValue({ payments: [] })
+
+    listPayments({ listPayments: listPaymentsFn } as never, 20, 50)
+
+    expect(listPaymentsFn).toHaveBeenCalledWith({
+      typeFilter: undefined,
+      statusFilter: undefined,
+      assetFilter: undefined,
+      paymentDetailsFilter: undefined,
+      fromTimestamp: undefined,
+      toTimestamp: undefined,
+      offset: 20,
+      limit: 50,
+      sortAscending: false,
+    })
+  })
+})
+
+describe("listSentPaymentsSince", () => {
+  it("asks for a page of outgoing payments from the timestamp on, newest first, in any status", () => {
+    const listPaymentsFn = jest.fn().mockResolvedValue({ payments: [] })
+
+    listSentPaymentsSince({ listPayments: listPaymentsFn } as never, {
+      fromTimestamp: BigInt(1747691078),
+      limit: 50,
+      offset: 100,
+    })
+
+    expect(listPaymentsFn).toHaveBeenCalledWith({
+      typeFilter: [0],
+      statusFilter: undefined,
+      assetFilter: undefined,
+      paymentDetailsFilter: undefined,
+      fromTimestamp: BigInt(1747691078),
+      toTimestamp: undefined,
+      offset: 100,
+      limit: 50,
+      sortAscending: false,
+    })
+  })
+})
+
+describe("listReceivedPaymentsSince", () => {
+  it("asks for the same page of incoming payments", () => {
+    const listPaymentsFn = jest.fn().mockResolvedValue({ payments: [] })
+
+    listReceivedPaymentsSince({ listPayments: listPaymentsFn } as never, {
+      fromTimestamp: BigInt(1747691078),
+      limit: 50,
+      offset: 100,
+    })
+
+    expect(listPaymentsFn).toHaveBeenCalledWith({
+      typeFilter: [1],
+      statusFilter: undefined,
+      assetFilter: undefined,
+      paymentDetailsFilter: undefined,
+      fromTimestamp: BigInt(1747691078),
+      toTimestamp: undefined,
+      offset: 100,
+      limit: 50,
+      sortAscending: false,
+    })
+  })
+})
+
+describe("listReceivedPaymentsOldestFirst", () => {
+  it("asks for the same page of incoming payments, oldest first", () => {
+    const listPaymentsFn = jest.fn().mockResolvedValue({ payments: [] })
+
+    listReceivedPaymentsOldestFirst({ listPayments: listPaymentsFn } as never, {
+      fromTimestamp: BigInt(1747691078),
+      limit: 50,
+      offset: 0,
+    })
+
+    expect(listPaymentsFn).toHaveBeenCalledWith(
+      expect.objectContaining({ typeFilter: [1], sortAscending: true }),
+    )
+  })
+})
+
+describe("listAllPayments", () => {
+  const payment = (id: string) => ({ id })
+
+  it("returns a single short page as-is", async () => {
+    const listPaymentsFn = jest
+      .fn()
+      .mockResolvedValue({ payments: [payment("a"), payment("b")] })
+
+    const all = await listAllPayments({ listPayments: listPaymentsFn } as never, 3)
+
+    expect(all.map((p) => p.id)).toEqual(["a", "b"])
+    expect(listPaymentsFn).toHaveBeenCalledTimes(1)
+    expect(listPaymentsFn).toHaveBeenCalledWith(
+      expect.objectContaining({ offset: 0, limit: 3, sortAscending: false }),
+    )
+  })
+
+  it("pages with increasing offsets until a short page", async () => {
+    const listPaymentsFn = jest
+      .fn()
+      .mockResolvedValueOnce({ payments: [payment("a"), payment("b")] })
+      .mockResolvedValueOnce({ payments: [payment("c"), payment("d")] })
+      .mockResolvedValueOnce({ payments: [payment("e")] })
+
+    const all = await listAllPayments({ listPayments: listPaymentsFn } as never, 2)
+
+    expect(all.map((p) => p.id)).toEqual(["a", "b", "c", "d", "e"])
+    expect(listPaymentsFn).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ offset: 2, limit: 2 }),
+    )
+    expect(listPaymentsFn).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ offset: 4, limit: 2 }),
+    )
+  })
+
+  it("drops a payment repeated across a page boundary by a mid-export write", async () => {
+    const listPaymentsFn = jest
+      .fn()
+      .mockResolvedValueOnce({ payments: [payment("a"), payment("b")] })
+      .mockResolvedValueOnce({ payments: [payment("b"), payment("c")] })
+      .mockResolvedValueOnce({ payments: [] })
+
+    const all = await listAllPayments({ listPayments: listPaymentsFn } as never, 2)
+
+    expect(all.map((p) => p.id)).toEqual(["a", "b", "c"])
+  })
+
+  it("throws instead of looping forever when the SDK keeps returning full pages", async () => {
+    let counter = 0
+    const listPaymentsFn = jest.fn().mockImplementation(() => {
+      counter += 1
+      return Promise.resolve({ payments: [payment(`p${counter}`)] })
+    })
+
+    await expect(
+      listAllPayments({ listPayments: listPaymentsFn } as never, 1),
+    ).rejects.toThrow(/pages/)
+  })
+})
+
+describe("getUserSettings", () => {
+  it("delegates to sdk.getUserSettings", () => {
+    const getSettings = jest.fn().mockResolvedValue({})
+
+    getUserSettings({ getUserSettings: getSettings } as never)
+
+    expect(getSettings).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("checkLightningAddressAvailable", () => {
+  it("forwards the username and returns the SDK availability result", async () => {
+    const check = jest.fn().mockResolvedValue(true)
+
+    const result = await checkLightningAddressAvailable(
+      { checkLightningAddressAvailable: check } as never,
+      "alice",
+    )
+
+    expect(check).toHaveBeenCalledWith({ username: "alice" })
+    expect(result).toBe(true)
+  })
+})
+
+describe("registerLightningAddress", () => {
+  it("forwards the username and returns the address info", async () => {
+    const register = jest
+      .fn()
+      .mockResolvedValue({ lightningAddress: "alice@staging.blink.sv" })
+
+    const result = await registerLightningAddress(
+      { registerLightningAddress: register } as never,
+      "alice",
+    )
+
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({ username: "alice" }))
+    expect(result).toEqual({ lightningAddress: "alice@staging.blink.sv" })
+  })
+})

@@ -1,0 +1,1169 @@
+import { Network as mockSparkNetwork } from "@breeztech/breez-sdk-spark-react-native"
+import { renderHook, act, waitFor } from "@testing-library/react-native"
+
+import { ActiveWalletStatus } from "@app/types/wallet"
+import { useSdkLifecycle } from "@app/self-custodial/hooks/use-sdk-lifecycle"
+
+jest.mock("@breeztech/breez-sdk-spark-react-native", () => ({
+  Network: { Mainnet: 0, Regtest: 1 },
+  // eslint-disable-next-line camelcase
+  SdkEvent_Tags: {
+    Synced: "Synced",
+    PaymentSucceeded: "PaymentSucceeded",
+    PaymentPending: "PaymentPending",
+    ClaimedDeposits: "ClaimedDeposits",
+    UnclaimedDeposits: "UnclaimedDeposits",
+    PaymentFailed: "PaymentFailed",
+    AutoOptimization: "AutoOptimization",
+    LightningAddressChanged: "LightningAddressChanged",
+    NewDeposits: "NewDeposits",
+  },
+}))
+
+jest.mock("@app/self-custodial/hooks/use-spark-network", () => ({
+  useSparkNetwork: () => mockSparkNetwork.Regtest,
+}))
+
+const mockScopeLostAttemptsTo = jest.fn()
+jest.mock("@app/self-custodial/payment-details/lost-attempts", () => {
+  const actual = jest.requireActual("@app/self-custodial/payment-details/lost-attempts")
+  return {
+    ...actual,
+    scopeLostAttemptsTo: (...args: Parameters<typeof actual.scopeLostAttemptsTo>) => {
+      mockScopeLostAttemptsTo(...args)
+      return actual.scopeLostAttemptsTo(...args)
+    },
+  }
+})
+
+const mockReadMnemonicWithStatus = jest.fn()
+jest.mock("@app/utils/storage/secureStorage", () => ({
+  __esModule: true,
+  default: {
+    readMnemonicWithStatus: (id: string) => mockReadMnemonicWithStatus(id),
+  },
+}))
+
+const mockInitSdk = jest.fn()
+const mockDisconnectSdk = jest.fn()
+const mockAddSdkEventListener = jest.fn()
+const mockRemoveSdkEventListener = jest.fn()
+const mockGetUserSettings = jest.fn()
+
+jest.mock("@app/self-custodial/bridge", () => ({
+  initSdk: (...args: unknown[]) => mockInitSdk(...args),
+  disconnectSdk: (...args: unknown[]) => mockDisconnectSdk(...args),
+  addSdkEventListener: (...args: unknown[]) => mockAddSdkEventListener(...args),
+  removeSdkEventListener: (...args: unknown[]) => mockRemoveSdkEventListener(...args),
+  getUserSettings: (...args: unknown[]) => mockGetUserSettings(...args),
+  SdkStorageRetiredError: class SdkStorageRetiredError extends Error {},
+}))
+
+const mockValidateStoredNetwork = jest.fn()
+jest.mock("@app/self-custodial/providers/validate-network", () => ({
+  validateStoredNetwork: (...args: unknown[]) => mockValidateStoredNetwork(...args),
+}))
+
+const mockGetSnapshot = jest.fn()
+jest.mock("@app/self-custodial/providers/wallet-snapshot", () => ({
+  getSelfCustodialWalletSnapshot: (...args: unknown[]) => mockGetSnapshot(...args),
+  loadMoreTransactions: jest
+    .fn()
+    .mockResolvedValue({ transactions: [], hasMore: false, rawCount: 0 }),
+  appendTransactions: jest.fn().mockImplementation((wallets: unknown) => wallets),
+  mergeOrderedTransactions: jest
+    .fn()
+    .mockImplementation((existing: unknown[] = [], incoming: unknown[] = []) => [
+      ...existing,
+      ...incoming,
+    ]),
+}))
+
+jest.mock("@app/self-custodial/providers/is-online", () => ({
+  OnlineState: { Online: "online", Offline: "offline", Unknown: "unknown" },
+  getOnlineState: jest.fn().mockResolvedValue("online"),
+  getServiceStatus: jest.fn().mockResolvedValue(0),
+  isDegradedStatus: jest.fn().mockReturnValue(false),
+  STATUS_TIMEOUT_MS: 5000,
+}))
+
+jest.mock("@app/utils/with-timeout", () => ({
+  withTimeout: <T>(p: Promise<T>) => p,
+}))
+
+jest.mock("@app/self-custodial/logging", () => ({
+  logSdkEvent: jest.fn(),
+  SdkLogLevel: { Error: "error" },
+}))
+
+jest.mock("@app/self-custodial/config", () => ({
+  storageDirFor: (id: string) => `/tmp/${id}`,
+  /** Read by `useLnurlServer`, which the lifecycle hook calls for the domain it hands
+   *  to `initSdk`. Its value is irrelevant here; its absence is not. */
+  resolveLnurlServer: () => ({ serverUrl: "https://blink.sv", domain: "blink.sv" }),
+}))
+
+let mockDepositClaimLeewayVbyte = 7
+jest.mock("@app/config/feature-flags-context", () => ({
+  useRemoteConfig: () => ({
+    selfCustodialDepositClaimLeewayVbyte: mockDepositClaimLeewayVbyte,
+  }),
+}))
+
+const mockMeasureObservedPayment = jest.fn()
+jest.mock("@app/self-custodial/measurement", () => ({
+  measureObservedPayment: (...args: unknown[]) => mockMeasureObservedPayment(...args),
+}))
+
+const mockRecordError = jest.fn()
+const mockCrashlyticsLog = jest.fn()
+jest.mock("@react-native-firebase/crashlytics", () => () => ({
+  recordError: (...args: unknown[]) => mockRecordError(...args),
+  log: (...args: unknown[]) => mockCrashlyticsLog(...args),
+}))
+
+type SdkEventListener = (event: { tag: string; inner?: unknown }) => Promise<void>
+
+const captureListener = (): { current: SdkEventListener | null } => {
+  const ref: { current: SdkEventListener | null } = { current: null }
+  mockAddSdkEventListener.mockImplementation(
+    (_sdk: unknown, onEvent: SdkEventListener) => {
+      ref.current = onEvent
+      return Promise.resolve("listener-id")
+    },
+  )
+  return ref
+}
+
+const buildSdk = (id: string) => ({ id }) as unknown as object
+
+const resetMocks = () => {
+  jest.clearAllMocks()
+  mockDepositClaimLeewayVbyte = 7
+  mockReadMnemonicWithStatus.mockResolvedValue({
+    status: "found",
+    value: "word1 word2 word3",
+  })
+  mockValidateStoredNetwork.mockResolvedValue(true)
+  mockGetSnapshot.mockResolvedValue({
+    wallets: [],
+    allTransactions: [],
+    hasMore: false,
+    rawTransactionCount: 0,
+  })
+  mockAddSdkEventListener.mockResolvedValue("listener-id")
+  mockRemoveSdkEventListener.mockResolvedValue(undefined)
+  mockGetUserSettings.mockResolvedValue({ stableBalanceActiveLabel: undefined })
+  mockDisconnectSdk.mockResolvedValue(undefined)
+  const isOnline = jest.requireMock("@app/self-custodial/providers/is-online")
+  isOnline.getOnlineState.mockResolvedValue("online")
+  isOnline.getServiceStatus.mockResolvedValue(0)
+  isOnline.isDegradedStatus.mockReturnValue(false)
+}
+
+describe("useSdkLifecycle", () => {
+  beforeEach(resetMocks)
+
+  describe("inactive paths", () => {
+    it("stays Unavailable and never calls initSdk when accountId is null", async () => {
+      const { result } = renderHook(() => useSdkLifecycle(null, 0))
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Unavailable)
+      })
+      expect(mockInitSdk).not.toHaveBeenCalled()
+    })
+
+    it("falls to Unavailable when the keystore has no mnemonic for the account", async () => {
+      mockReadMnemonicWithStatus.mockResolvedValue({ status: "absent" })
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Unavailable)
+      })
+      expect(mockInitSdk).not.toHaveBeenCalled()
+    })
+
+    /**
+     * Unavailable is terminal for an account: it reads as "there is no wallet
+     * here". A keystore that could not answer says nothing of the sort. Recovery
+     * from here is not automatic — the backoff retry is armed inside
+     * refreshWallets and gated on a live SDK, which this path never connected.
+     *
+     * That null SDK is also the premise PaymentOfflineNotice's retry branches
+     * on, so it is asserted here rather than assumed: the notice's own spec
+     * mocks the provider, and would keep passing if a stale SDK ever survived
+     * this transition and quietly turned the fix into a no-op.
+     */
+    it("falls to Error with no connected SDK when the keystore cannot answer", async () => {
+      mockReadMnemonicWithStatus.mockResolvedValue({
+        status: "failed",
+        err: new Error("keystore locked"),
+      })
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Error)
+      })
+      expect(result.current.sdk).toBeNull()
+      expect(mockInitSdk).not.toHaveBeenCalled()
+    })
+
+    it("falls to Error when the stored network does not match the current build", async () => {
+      mockValidateStoredNetwork.mockResolvedValue(false)
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Error)
+      })
+      expect(mockInitSdk).not.toHaveBeenCalled()
+    })
+
+    it("falls to Error when initSdk throws", async () => {
+      mockInitSdk.mockRejectedValue(new Error("connect failed"))
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Error)
+      })
+    })
+
+    it("treats a connect refused for a wallet being deleted as expected, not an error", async () => {
+      const { SdkStorageRetiredError } = jest.requireMock("@app/self-custodial/bridge")
+      mockInitSdk.mockRejectedValue(new SdkStorageRetiredError("/tmp/acct-1"))
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(mockInitSdk).toHaveBeenCalledTimes(1)
+      })
+      await act(async () => {
+        await new Promise((resolve) => {
+          setImmediate(resolve)
+        })
+      })
+      expect(result.current.status).not.toBe(ActiveWalletStatus.Error)
+      expect(mockRecordError).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("remote-config leeway changes", () => {
+    it("does not reconnect the SDK when only the deposit-claim leeway changes", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      captureListener()
+
+      const { rerender, result } = renderHook(
+        ({ accountId }: { accountId: string }) => useSdkLifecycle(accountId, 0),
+        { initialProps: { accountId: "acct-1" } },
+      )
+
+      await waitFor(() => {
+        expect(result.current.sdk).not.toBeNull()
+      })
+      expect(mockInitSdk).toHaveBeenCalledTimes(1)
+
+      mockDepositClaimLeewayVbyte = 9
+      rerender({ accountId: "acct-1" })
+      await act(async () => {})
+
+      expect(mockInitSdk).toHaveBeenCalledTimes(1)
+      expect(mockDisconnectSdk).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("happy path", () => {
+    /** Not by the storage directory, whose absolute path can move with an app update:
+     *  the lost attempts are kept across launches under this name. */
+    it("scopes the lost attempts to the wallet by network and account", async () => {
+      const sdk = buildSdk("sdk-1")
+      mockInitSdk.mockResolvedValue(sdk)
+      captureListener()
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(result.current.sdk).toBe(sdk)
+      })
+      expect(mockScopeLostAttemptsTo).toHaveBeenCalledWith(
+        `${mockSparkNetwork.Regtest}:acct-1`,
+      )
+    })
+
+    it("loads the mnemonic, validates the network, initializes the SDK, and reaches Ready after the Synced event", async () => {
+      const sdk = buildSdk("sdk-1")
+      mockInitSdk.mockResolvedValue(sdk)
+      const listener = captureListener()
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(result.current.sdk).toBe(sdk)
+      })
+
+      expect(mockReadMnemonicWithStatus).toHaveBeenCalledWith("acct-1")
+      expect(mockValidateStoredNetwork).toHaveBeenCalledWith(
+        "acct-1",
+        mockSparkNetwork.Regtest,
+      )
+      expect(mockInitSdk).toHaveBeenCalledWith({
+        mnemonic: "word1 word2 word3",
+        storageDir: "/tmp/acct-1",
+        network: mockSparkNetwork.Regtest,
+        leewaySatPerVbyte: 7,
+        lnurlDomain: "blink.sv",
+      })
+      expect(result.current.connectedAccountId).toBe("acct-1")
+
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+      await act(async () => {
+        await listener.current?.({ tag: "Synced" })
+      })
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Ready)
+      })
+    })
+
+    it("transitions to Ready after the first successful snapshot, even when the Synced event never arrives (regression for #3791)", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      captureListener()
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Ready)
+      })
+    })
+
+    it("surfaces the lastReceivedPaymentId when a PaymentSucceeded event fires", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      const listener = captureListener()
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+
+      await act(async () => {
+        await listener.current?.({
+          tag: "PaymentSucceeded",
+          inner: { payment: { id: "p1" } },
+        })
+      })
+
+      expect(result.current.lastReceivedPaymentId).toBe("p1")
+    })
+  })
+
+  describe("account-switch disconnect ordering", () => {
+    it("disconnects the previous SDK when the active account changes", async () => {
+      const sdkA = buildSdk("sdk-A")
+      const sdkB = buildSdk("sdk-B")
+      mockInitSdk.mockResolvedValueOnce(sdkA).mockResolvedValueOnce(sdkB)
+      captureListener()
+
+      const { rerender } = renderHook(
+        ({ accountId }: { accountId: string }) => useSdkLifecycle(accountId, 0),
+        { initialProps: { accountId: "acct-A" } },
+      )
+
+      await waitFor(() => {
+        expect(mockInitSdk).toHaveBeenCalledWith({
+          mnemonic: "word1 word2 word3",
+          storageDir: "/tmp/acct-A",
+          network: mockSparkNetwork.Regtest,
+          leewaySatPerVbyte: 7,
+          lnurlDomain: "blink.sv",
+        })
+      })
+
+      rerender({ accountId: "acct-B" })
+
+      await waitFor(() => {
+        expect(mockDisconnectSdk).toHaveBeenCalledWith(sdkA)
+      })
+      await waitFor(() => {
+        expect(mockInitSdk).toHaveBeenCalledWith({
+          mnemonic: "word1 word2 word3",
+          storageDir: "/tmp/acct-B",
+          network: mockSparkNetwork.Regtest,
+          leewaySatPerVbyte: 7,
+          lnurlDomain: "blink.sv",
+        })
+      })
+
+      expect(mockDisconnectSdk.mock.invocationCallOrder[0]).toBeLessThan(
+        mockInitSdk.mock.invocationCallOrder[1],
+      )
+      expect(mockRemoveSdkEventListener).toHaveBeenCalledWith(sdkA, "listener-id")
+    })
+
+    it("never connects a run cancelled while it was still validating the network", async () => {
+      // a deletion switches away from the wallet while its lifecycle holds the mnemonic
+      let finishValidation: (isValid: boolean) => void = () => {}
+      mockValidateStoredNetwork.mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            finishValidation = resolve
+          }),
+      )
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-B"))
+      captureListener()
+
+      const { rerender } = renderHook(
+        ({ accountId }: { accountId: string }) => useSdkLifecycle(accountId, 0),
+        { initialProps: { accountId: "acct-A" } },
+      )
+      await waitFor(() => {
+        expect(mockValidateStoredNetwork).toHaveBeenCalledTimes(1)
+      })
+      rerender({ accountId: "acct-B" })
+      await waitFor(() => {
+        expect(mockInitSdk).toHaveBeenCalledWith(
+          expect.objectContaining({ storageDir: "/tmp/acct-B" }),
+        )
+      })
+
+      await act(async () => {
+        finishValidation(true)
+        await new Promise((resolve) => {
+          setImmediate(resolve)
+        })
+      })
+
+      expect(mockInitSdk).toHaveBeenCalledTimes(1)
+      expect(mockInitSdk).not.toHaveBeenCalledWith(
+        expect.objectContaining({ storageDir: "/tmp/acct-A" }),
+      )
+    })
+
+    it("disconnects the SDK on unmount", async () => {
+      const sdk = buildSdk("sdk-1")
+      mockInitSdk.mockResolvedValue(sdk)
+      captureListener()
+
+      const { unmount } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(mockInitSdk).toHaveBeenCalled()
+      })
+
+      unmount()
+
+      await waitFor(() => {
+        expect(mockDisconnectSdk).toHaveBeenCalledWith(sdk)
+      })
+    })
+
+    it("flips status to Unavailable when accountId transitions to null after being active", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      captureListener()
+
+      const { result, rerender } = renderHook(
+        ({ accountId }: { accountId: string | null }) => useSdkLifecycle(accountId, 0),
+        { initialProps: { accountId: "acct-1" as string | null } },
+      )
+
+      await waitFor(() => {
+        expect(result.current.sdk).not.toBeNull()
+      })
+
+      rerender({ accountId: null })
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Unavailable)
+      })
+      expect(result.current.sdk).toBeNull()
+    })
+  })
+
+  describe("listener event filtering", () => {
+    it("ignores events whose tag is not in REFRESH_EVENTS", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      const listener = captureListener()
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+
+      const snapshotCallsBefore = mockGetSnapshot.mock.calls.length
+
+      await act(async () => {
+        await listener.current?.({ tag: "AutoOptimization" })
+      })
+
+      expect(mockGetSnapshot.mock.calls).toHaveLength(snapshotCallsBefore)
+      expect(result.current.lastReceivedPaymentId).toBeNull()
+    })
+
+    /** NewDeposits only reached REFRESH_EVENTS in 0.22. If this mock ever drops the tag
+     *  again the set holds `undefined`, and this refresh silently stops happening. */
+    it("refreshes on a NewDeposits event", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      const listener = captureListener()
+
+      renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+
+      const snapshotCallsBefore = mockGetSnapshot.mock.calls.length
+
+      await act(async () => {
+        await listener.current?.({ tag: "NewDeposits" })
+      })
+
+      expect(mockGetSnapshot.mock.calls.length).toBeGreaterThan(snapshotCallsBefore)
+    })
+
+    /** A failed send is the only word a pending send gets of its failure, and it is not a
+     *  refresh event: it has to reach telemetry before the refresh filter drops it. */
+    it("hands a failed send to telemetry without refreshing", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      const listener = captureListener()
+      renderHook(() => useSdkLifecycle("acct-1", 0))
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+      const snapshotCallsBefore = mockGetSnapshot.mock.calls.length
+      const payment = { id: "pay-1", paymentType: 0, method: 0, status: 2 }
+
+      await act(async () => {
+        await listener.current?.({ tag: "PaymentFailed", inner: { payment } })
+      })
+
+      expect(mockMeasureObservedPayment).toHaveBeenCalledWith(payment)
+      expect(mockGetSnapshot.mock.calls).toHaveLength(snapshotCallsBefore)
+    })
+
+    it("hands telemetry nothing for an event whose payment it cannot read", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      const listener = captureListener()
+      renderHook(() => useSdkLifecycle("acct-1", 0))
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+
+      await act(async () => {
+        await listener.current?.({
+          tag: "PaymentSucceeded",
+          inner: { payment: { id: "pay-1", paymentType: 1, method: 0 } },
+        })
+      })
+
+      expect(mockMeasureObservedPayment).not.toHaveBeenCalled()
+    })
+
+    it("does not update lastReceivedPaymentId when the event lacks inner.payment", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      const listener = captureListener()
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+
+      await act(async () => {
+        await listener.current?.({ tag: "PaymentSucceeded", inner: undefined })
+      })
+
+      expect(result.current.lastReceivedPaymentId).toBeNull()
+    })
+  })
+
+  describe("loadMore", () => {
+    it("appends loaded transactions and advances the raw offset", async () => {
+      const sdk = buildSdk("sdk-1")
+      mockInitSdk.mockResolvedValue(sdk)
+      captureListener()
+
+      const newTransactions = [{ id: "tx-1" }]
+      const existingAllTransactions = [{ id: "tx-existing" }]
+      const {
+        loadMoreTransactions: loadMoreMock,
+        appendTransactions: appendMock,
+        mergeOrderedTransactions: mergeMock,
+      } = jest.requireMock("@app/self-custodial/providers/wallet-snapshot")
+      loadMoreMock.mockResolvedValue({
+        transactions: newTransactions,
+        hasMore: true,
+        rawCount: 5,
+      })
+      appendMock.mockImplementation((wallets: unknown[]) => [...wallets, "appended"])
+
+      mockGetSnapshot.mockResolvedValue({
+        wallets: ["w1"],
+        allTransactions: existingAllTransactions,
+        hasMore: true,
+        rawTransactionCount: 0,
+      })
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(result.current.hasMoreTransactions).toBe(true)
+      })
+
+      await act(async () => {
+        await result.current.loadMore()
+      })
+
+      expect(loadMoreMock).toHaveBeenCalledWith(sdk, 0)
+      expect(appendMock).toHaveBeenCalledWith(["w1"], newTransactions)
+      expect(mergeMock).toHaveBeenCalledWith(existingAllTransactions, newTransactions)
+      expect(result.current.allTransactions).toEqual([
+        ...existingAllTransactions,
+        ...newTransactions,
+      ])
+      expect(result.current.hasMoreTransactions).toBe(true)
+    })
+
+    it("no-ops when hasMoreTransactions is false", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      captureListener()
+      const { loadMoreTransactions: loadMoreMock } = jest.requireMock(
+        "@app/self-custodial/providers/wallet-snapshot",
+      )
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(result.current.sdk).not.toBeNull()
+      })
+
+      await act(async () => {
+        await result.current.loadMore()
+      })
+
+      expect(loadMoreMock).not.toHaveBeenCalled()
+    })
+
+    it("no-ops when the SDK is not connected", async () => {
+      const { loadMoreTransactions: loadMoreMock } = jest.requireMock(
+        "@app/self-custodial/providers/wallet-snapshot",
+      )
+
+      const { result } = renderHook(() => useSdkLifecycle(null, 0))
+
+      await act(async () => {
+        await result.current.loadMore()
+      })
+
+      expect(loadMoreMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("refreshStableBalanceActive", () => {
+    it("reads user settings and flips sdkStableBalanceActive when a label exists", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      captureListener()
+      mockGetUserSettings.mockResolvedValueOnce({ stableBalanceActiveLabel: undefined })
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(result.current.sdkStableBalanceActive).toBe(false)
+      })
+
+      mockGetUserSettings.mockResolvedValueOnce({ stableBalanceActiveLabel: "USD" })
+
+      await act(async () => {
+        await result.current.refreshStableBalanceActive()
+      })
+
+      expect(result.current.sdkStableBalanceActive).toBe(true)
+    })
+
+    it("no-ops when the SDK is not connected", async () => {
+      const { result } = renderHook(() => useSdkLifecycle(null, 0))
+
+      await act(async () => {
+        await result.current.refreshStableBalanceActive()
+      })
+
+      expect(mockGetUserSettings).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("refreshWallets re-entrancy", () => {
+    it("coalesces concurrent refresh calls via pendingRefreshRef so runOnce drains the pending flag", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      const listener = captureListener()
+
+      let resolveFirst: (v: {
+        wallets: unknown[]
+        hasMore: boolean
+        rawTransactionCount: number
+      }) => void = () => {}
+      mockGetSnapshot.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve
+          }),
+      )
+      mockGetSnapshot.mockResolvedValue({
+        wallets: [],
+        hasMore: false,
+        rawTransactionCount: 0,
+      })
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+
+      const callsBefore = mockGetSnapshot.mock.calls.length
+
+      act(() => {
+        listener.current?.({ tag: "Synced" })
+        listener.current?.({ tag: "Synced" })
+      })
+
+      await act(async () => {
+        resolveFirst({ wallets: [], hasMore: false, rawTransactionCount: 0 })
+        await new Promise<void>((r) => {
+          setImmediate(r)
+        })
+      })
+
+      await waitFor(() => {
+        expect(mockGetSnapshot.mock.calls).toHaveLength(callsBefore + 1)
+      })
+      expect(result.current.status).toBe(ActiveWalletStatus.Ready)
+    })
+
+    it("resolves each caller after its own iteration even while others keep re-arming the loop", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      captureListener()
+      mockGetSnapshot.mockResolvedValue({
+        wallets: [],
+        hasMore: false,
+        rawTransactionCount: 0,
+      })
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Ready)
+      })
+
+      const emptySnapshot = {
+        wallets: [],
+        hasMore: false,
+        rawTransactionCount: 0,
+      }
+      const pendingSnapshots: ((value: typeof emptySnapshot) => void)[] = []
+      mockGetSnapshot.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            pendingSnapshots.push(resolve)
+          }),
+      )
+      const finishIteration = async () => {
+        await act(async () => {
+          pendingSnapshots.shift()?.(emptySnapshot)
+          await new Promise<void>((r) => {
+            setImmediate(r)
+          })
+        })
+      }
+
+      let pullSettled = false
+      act(() => {
+        // Iteration 1: the background poll's refresh is in flight.
+        result.current.refreshWallets()
+        // The user's pull arrives mid-iteration → served by iteration 2.
+        result.current.refreshWallets().then(() => {
+          pullSettled = true
+        })
+      })
+
+      await finishIteration() // iteration 1 completes; iteration 2 starts
+      expect(pullSettled).toBe(false)
+
+      act(() => {
+        // Another poll tick re-arms the loop mid-iteration-2 — offline, this
+        // repeats forever; the pull must not inherit that lifetime.
+        result.current.refreshWallets()
+      })
+
+      await finishIteration() // iteration 2 completes → the pull settles
+      expect(pullSettled).toBe(true)
+      // The loop is still draining the third caller.
+      expect(pendingSnapshots.length + mockGetSnapshot.mock.calls.length).toBeGreaterThan(
+        0,
+      )
+
+      await finishIteration() // let iteration 3 finish cleanly
+    })
+
+    it("hands overlapping callers the completion of the iteration serving them (pull-to-refresh must not retract early)", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      captureListener()
+      mockGetSnapshot.mockResolvedValue({
+        wallets: [],
+        hasMore: false,
+        rawTransactionCount: 0,
+      })
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Ready)
+      })
+
+      type Snapshot = {
+        wallets: unknown[]
+        hasMore: boolean
+        rawTransactionCount: number
+      }
+      const emptySnapshot: Snapshot = {
+        wallets: [],
+        hasMore: false,
+        rawTransactionCount: 0,
+      }
+      let resolveSnapshot: (value: Snapshot) => void = () => {}
+      mockGetSnapshot.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveSnapshot = resolve
+          }),
+      )
+
+      let firstSettled = false
+      let secondSettled = false
+      let first: Promise<void> = Promise.resolve()
+      let second: Promise<void> = Promise.resolve()
+      act(() => {
+        first = result.current.refreshWallets().then(() => {
+          firstSettled = true
+        })
+        second = result.current.refreshWallets().then(() => {
+          secondSettled = true
+        })
+      })
+
+      await act(async () => {
+        await new Promise<void>((r) => {
+          setImmediate(r)
+        })
+      })
+      // The overlapping call must not resolve before any snapshot landed.
+      expect(secondSettled).toBe(false)
+
+      // The queued rerun issues a second snapshot fetch; drain both.
+      await act(async () => {
+        resolveSnapshot(emptySnapshot)
+        await new Promise<void>((r) => {
+          setImmediate(r)
+        })
+        resolveSnapshot(emptySnapshot)
+        await new Promise<void>((r) => {
+          setImmediate(r)
+        })
+      })
+
+      await act(async () => {
+        await Promise.all([first, second])
+      })
+      expect(firstSettled).toBe(true)
+      expect(secondSettled).toBe(true)
+    })
+  })
+})
+
+describe("useSdkLifecycle: connectivity and retries", () => {
+  beforeEach(resetMocks)
+
+  describe("offline / degraded transitions", () => {
+    it("flips status to Offline when snapshot fails and connectivity is Offline", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      const listener = captureListener()
+      mockGetSnapshot.mockRejectedValue(new Error("snapshot failed"))
+
+      const isOnline = jest.requireMock("@app/self-custodial/providers/is-online")
+      isOnline.getOnlineState.mockResolvedValue("offline")
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+
+      await act(async () => {
+        await listener.current?.({ tag: "Synced" })
+      })
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Offline)
+      })
+    })
+
+    it("flips status to Error when snapshot fails from Loading with Online connectivity", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      const listener = captureListener()
+
+      const isOnline = jest.requireMock("@app/self-custodial/providers/is-online")
+      isOnline.getOnlineState.mockResolvedValue("online")
+
+      mockGetSnapshot.mockRejectedValue(new Error("snapshot failed"))
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+
+      await act(async () => {
+        await listener.current?.({ tag: "Synced" })
+      })
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Error)
+      })
+    })
+
+    it("flips to Degraded when service status indicates degradation", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      const listener = captureListener()
+
+      const isOnline = jest.requireMock("@app/self-custodial/providers/is-online")
+      isOnline.isDegradedStatus.mockReturnValue(true)
+
+      const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+
+      await waitFor(() => {
+        expect(listener.current).not.toBeNull()
+      })
+
+      await act(async () => {
+        await listener.current?.({ tag: "Synced" })
+      })
+
+      await waitFor(() => {
+        expect(result.current.status).toBe(ActiveWalletStatus.Degraded)
+      })
+    })
+  })
+
+  describe("retryCount as effect dependency", () => {
+    it("retries the entire init flow when retryCount changes", async () => {
+      mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+      captureListener()
+
+      const { rerender } = renderHook(
+        ({ retry }: { retry: number }) => useSdkLifecycle("acct-1", retry),
+        { initialProps: { retry: 0 } },
+      )
+
+      await waitFor(() => {
+        expect(mockInitSdk).toHaveBeenCalledTimes(1)
+      })
+
+      rerender({ retry: 1 })
+
+      await waitFor(() => {
+        expect(mockInitSdk).toHaveBeenCalledTimes(2)
+      })
+    })
+  })
+})
+
+describe("useSdkLifecycle paging when the account switches or a page fails", () => {
+  beforeEach(resetMocks)
+
+  it("drops a page that lands after the account has switched", async () => {
+    mockInitSdk
+      .mockResolvedValueOnce(buildSdk("sdk-A"))
+      .mockResolvedValueOnce(buildSdk("sdk-B"))
+    captureListener()
+    mockGetSnapshot.mockResolvedValue({
+      wallets: [],
+      allTransactions: [],
+      hasMore: true,
+      rawTransactionCount: 0,
+    })
+    const { loadMoreTransactions: loadMoreMock, mergeOrderedTransactions: mergeMock } =
+      jest.requireMock("@app/self-custodial/providers/wallet-snapshot")
+    let resolvePageOfA: (page: unknown) => void = () => {}
+    loadMoreMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolvePageOfA = resolve
+        }),
+    )
+
+    const { result, rerender } = renderHook(
+      ({ accountId }: { accountId: string }) => useSdkLifecycle(accountId, 0),
+      { initialProps: { accountId: "acct-A" } },
+    )
+    await waitFor(() => expect(result.current.hasMoreTransactions).toBe(true))
+
+    let pageOfA: Promise<void> = Promise.resolve()
+    act(() => {
+      pageOfA = result.current.loadMore()
+    })
+
+    rerender({ accountId: "acct-B" })
+    await waitFor(() => expect(result.current.connectedAccountId).toBe("acct-B"))
+
+    await act(async () => {
+      resolvePageOfA({
+        transactions: [{ id: "older-payment-of-a" }],
+        hasMore: false,
+        rawCount: 1,
+      })
+      await pageOfA
+    })
+
+    expect(mergeMock).not.toHaveBeenCalled()
+    expect(result.current.allTransactions).toEqual([])
+  })
+
+  it("logs a page that fails and stops loading", async () => {
+    mockInitSdk.mockResolvedValue(buildSdk("sdk-1"))
+    captureListener()
+    mockGetSnapshot.mockResolvedValue({
+      wallets: [],
+      allTransactions: [],
+      hasMore: true,
+      rawTransactionCount: 0,
+    })
+    const { loadMoreTransactions: loadMoreMock } = jest.requireMock(
+      "@app/self-custodial/providers/wallet-snapshot",
+    )
+    loadMoreMock.mockRejectedValueOnce(new Error("page failed"))
+    const { logSdkEvent } = jest.requireMock("@app/self-custodial/logging")
+
+    const { result } = renderHook(() => useSdkLifecycle("acct-1", 0))
+    await waitFor(() => expect(result.current.hasMoreTransactions).toBe(true))
+
+    await act(async () => {
+      await result.current.loadMore()
+    })
+
+    expect(logSdkEvent).toHaveBeenCalledWith(
+      "error",
+      "Failed to load more transactions: Error: page failed",
+    )
+    expect(result.current.loadingMore).toBe(false)
+    expect(result.current.hasMoreTransactions).toBe(true)
+  })
+
+  it("starts the new account from its own first page", async () => {
+    const sdkB = buildSdk("sdk-B")
+    mockInitSdk.mockResolvedValueOnce(buildSdk("sdk-A")).mockResolvedValueOnce(sdkB)
+    captureListener()
+    mockGetSnapshot.mockResolvedValueOnce({
+      wallets: [],
+      allTransactions: [],
+      hasMore: true,
+      rawTransactionCount: 250,
+    })
+
+    const { result, rerender } = renderHook(
+      ({ accountId }: { accountId: string }) => useSdkLifecycle(accountId, 0),
+      { initialProps: { accountId: "acct-A" } },
+    )
+    await waitFor(() => expect(result.current.hasMoreTransactions).toBe(true))
+
+    rerender({ accountId: "acct-B" })
+    await waitFor(() => expect(result.current.connectedAccountId).toBe("acct-B"))
+    await waitFor(() =>
+      expect(mockGetSnapshot.mock.calls.some(([sdk]) => sdk === sdkB)).toBe(true),
+    )
+
+    const firstSnapshotOfB = mockGetSnapshot.mock.calls.find(([sdk]) => sdk === sdkB)
+    expect(firstSnapshotOfB).toEqual([sdkB, 0])
+  })
+
+  it("pages the new account on its own while the previous account's page is on its way", async () => {
+    const sdkB = buildSdk("sdk-B")
+    mockInitSdk.mockResolvedValueOnce(buildSdk("sdk-A")).mockResolvedValueOnce(sdkB)
+    captureListener()
+    mockGetSnapshot
+      .mockResolvedValueOnce({
+        wallets: [],
+        allTransactions: [],
+        hasMore: true,
+        rawTransactionCount: 250,
+      })
+      .mockResolvedValue({
+        wallets: [],
+        allTransactions: [],
+        hasMore: true,
+        rawTransactionCount: 20,
+      })
+    const { loadMoreTransactions: loadMoreMock } = jest.requireMock(
+      "@app/self-custodial/providers/wallet-snapshot",
+    )
+    let resolvePageOfA: (page: unknown) => void = () => {}
+    let resolvePageOfB: (page: unknown) => void = () => {}
+    loadMoreMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePageOfA = resolve
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePageOfB = resolve
+          }),
+      )
+
+    const { result, rerender } = renderHook(
+      ({ accountId }: { accountId: string }) => useSdkLifecycle(accountId, 0),
+      { initialProps: { accountId: "acct-A" } },
+    )
+    await waitFor(() => expect(result.current.hasMoreTransactions).toBe(true))
+    let pageOfA: Promise<void> = Promise.resolve()
+    act(() => {
+      pageOfA = result.current.loadMore()
+    })
+
+    rerender({ accountId: "acct-B" })
+    await waitFor(() => expect(result.current.connectedAccountId).toBe("acct-B"))
+    await waitFor(() => expect(result.current.hasMoreTransactions).toBe(true))
+    expect(result.current.loadingMore).toBe(false)
+
+    let pageOfB: Promise<void> = Promise.resolve()
+    act(() => {
+      pageOfB = result.current.loadMore()
+    })
+    expect(loadMoreMock).toHaveBeenLastCalledWith(sdkB, 20)
+
+    await act(async () => {
+      resolvePageOfA({
+        transactions: [{ id: "older-payment-of-a" }],
+        hasMore: false,
+        rawCount: 1,
+      })
+      await pageOfA
+    })
+    expect(result.current.loadingMore).toBe(true)
+
+    await act(async () => {
+      resolvePageOfB({
+        transactions: [{ id: "older-payment-of-b" }],
+        hasMore: false,
+        rawCount: 5,
+      })
+      await pageOfB
+    })
+    expect(result.current.loadingMore).toBe(false)
+    expect(result.current.hasMoreTransactions).toBe(false)
+    expect(result.current.allTransactions).toEqual([{ id: "older-payment-of-b" }])
+  })
+})

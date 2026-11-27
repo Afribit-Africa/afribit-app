@@ -1,0 +1,512 @@
+import React from "react"
+import { Alert, AlertButton, StyleSheet } from "react-native"
+import { act, fireEvent, render, screen, within } from "@testing-library/react-native"
+
+import { ThemeProvider, createTheme } from "@rn-vui/themed"
+
+import { dark, light } from "@app/rne-theme/colors"
+import { Delete } from "@app/screens/settings-screen/account/settings/delete"
+import { SwitchProfileOutcome } from "@app/hooks/use-switch-to-next-profile"
+
+const mockDeleteAccount = jest.fn()
+const mockSetAccountIsBeingDeleted = jest.fn()
+const mockSetOptions = jest.fn()
+const mockReset = jest.fn()
+const mockLogout = jest.fn()
+const mockSetAppUnlocked = jest.fn()
+const mockSetAppLocked = jest.fn()
+const mockSwitchToNextProfile = jest.fn()
+
+let mockSettingsData: unknown = { me: { defaultAccount: { wallets: [] } } }
+let mockSettingsLoading = false
+
+jest.mock("@app/graphql/generated", () => ({
+  ...jest.requireActual("@app/graphql/generated"),
+  useAccountDeleteMutation: () => [mockDeleteAccount],
+  useSettingsScreenQuery: () => ({
+    data: mockSettingsData,
+    loading: mockSettingsLoading,
+  }),
+}))
+
+jest.mock("@react-navigation/native", () => ({
+  ...jest.requireActual("@react-navigation/native"),
+  useNavigation: () => ({ setOptions: mockSetOptions, reset: mockReset }),
+}))
+
+jest.mock("@app/hooks/use-logout", () => ({
+  __esModule: true,
+  default: () => ({ logout: mockLogout }),
+}))
+
+jest.mock("@app/hooks", () => ({
+  ...jest.requireActual("@app/hooks"),
+  useAppConfig: () => ({ appConfig: { token: "custodial-token" } }),
+}))
+
+/** The profile switch's module reads the lock flag from this context, which pulls in native
+ *  boot code; the switch itself is stood in for below, so only the import has to load.
+ *  The lock setters are the routing rule's, which decides where a finished logout lands. */
+jest.mock("@app/navigation/navigation-container-wrapper", () => ({
+  useAuthenticationContext: () => ({
+    isAppLocked: false,
+    setAppUnlocked: mockSetAppUnlocked,
+    setAppLocked: mockSetAppLocked,
+  }),
+}))
+
+jest.mock("@app/hooks/use-switch-to-next-profile", () => ({
+  ...jest.requireActual("@app/hooks/use-switch-to-next-profile"),
+  useSwitchToNextProfile: () => ({ switchToNextProfile: mockSwitchToNextProfile }),
+}))
+
+jest.mock("@app/hooks/use-display-currency", () => ({
+  useDisplayCurrency: () => ({
+    formatMoneyAmount: ({ moneyAmount }: { moneyAmount: { amount: number } }) =>
+      `$${moneyAmount.amount}`,
+  }),
+}))
+
+const mockLeaveWhileDeleting = jest.fn((navigate: () => void) => navigate())
+const wasLockReleased = () =>
+  mockSetAccountIsBeingDeleted.mock.calls.some(
+    ([isBeingDeleted]) => isBeingDeleted === false,
+  )
+jest.mock("@app/screens/settings-screen/account/account-delete-context", () => ({
+  useAccountDeleteContext: () => ({
+    setAccountIsBeingDeleted: mockSetAccountIsBeingDeleted,
+    leaveWhileDeleting: (navigate: () => void) => mockLeaveWhileDeleting(navigate),
+  }),
+}))
+
+jest.mock("react-native-modal", () => ({
+  __esModule: true,
+  default: ({
+    isVisible,
+    children,
+  }: {
+    isVisible: boolean
+    children: React.ReactNode
+  }) => {
+    const { View } = jest.requireActual("react-native")
+    return isVisible ? <View testID="delete-modal">{children}</View> : null
+  },
+}))
+
+jest.mock("@app/i18n/i18n-react", () => ({
+  useI18nContext: () => ({
+    LL: {
+      common: {
+        cancel: () => "cancel-from-ll",
+        confirm: () => "confirm-from-ll",
+        error: () => "Error",
+        ok: () => "OK",
+        warning: () => "Warning",
+        yes: () => "Yes",
+      },
+      support: {
+        bye: () => "Bye",
+        delete: () => "delete",
+        deleteAccount: () => "Delete account",
+        deleteAccountBalanceWarning: () => "You still hold a balance",
+        deleteAccountConfirmation: () => "Your account has been deleted",
+        deleteAccountError: ({ email }: { email: string }) => `Write to ${email}`,
+        deleteAccountWarning: () => "This cannot be undone",
+        finalConfirmationAccountDeletionTitle: () => "Are you sure?",
+        finalConfirmationAccountDeletionMessage: () => "This is permanent",
+        typeDelete: ({ delete: word }: { delete: string }) => `Type ${word}`,
+      },
+      AccountScreen: {
+        btcBalanceWarning: ({ balance }: { balance: string }) => `BTC ${balance}`,
+        usdBalanceWarning: ({ balance }: { balance: string }) => `USD ${balance}`,
+      },
+    },
+  }),
+}))
+
+/** The real theme rather than a mocked `@rn-vui/themed`: the screen renders that library's
+ *  Button, Skeleton and Text, and stubbing the module would take those with it. */
+const theme = createTheme({ lightColors: light, darkColors: dark, mode: "light" })
+
+const renderDelete = () =>
+  render(
+    <ThemeProvider theme={theme}>
+      <Delete />
+    </ThemeProvider>,
+  )
+
+const walletsWith = (btcBalance: number, usdBalance: number) => ({
+  me: {
+    defaultAccount: {
+      wallets: [
+        { id: "btc", walletCurrency: "BTC", balance: btcBalance },
+        { id: "usd", walletCurrency: "USD", balance: usdBalance },
+      ],
+    },
+  },
+})
+
+/** Every path to the deletion runs through Alert buttons, so the spy has to hand them back
+ *  rather than just record that an alert happened. */
+const alertCalls: Array<{ title: string; body?: string; buttons?: AlertButton[] }> = []
+
+const pressAlertButton = async (call: number, label: string) => {
+  const button = alertCalls[call]?.buttons?.find((candidate) => candidate.text === label)
+  await act(async () => {
+    await button?.onPress?.()
+  })
+}
+
+const openDeletionModal = async () => {
+  renderDelete()
+  await act(async () => {
+    fireEvent.press(screen.getByText("Delete account"))
+  })
+}
+
+const confirmDeletion = async () => {
+  fireEvent.changeText(screen.getByPlaceholderText("delete"), "delete")
+  await act(async () => {
+    fireEvent.press(screen.getByText("confirm-from-ll"))
+  })
+  await pressAlertButton(alertCalls.length - 1, "OK")
+}
+
+describe("Delete", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    alertCalls.length = 0
+    mockSettingsData = { me: { defaultAccount: { wallets: [] } } }
+    mockSettingsLoading = false
+    mockDeleteAccount.mockResolvedValue({
+      data: { accountDelete: { success: true, errors: [] } },
+    })
+    mockSwitchToNextProfile.mockResolvedValue(SwitchProfileOutcome.Switched)
+    mockLogout.mockResolvedValue({ isAppLockKept: false })
+    jest
+      .spyOn(Alert, "alert")
+      .mockImplementation((title, body, buttons) =>
+        alertCalls.push({ title, body, buttons }),
+      )
+  })
+
+  afterEach(() => {
+    jest.restoreAllMocks()
+  })
+
+  it("shows a skeleton instead of the button while the balances load", () => {
+    mockSettingsLoading = true
+    renderDelete()
+
+    expect(screen.queryByText("Delete account")).toBeNull()
+  })
+
+  it("opens the deletion modal straight away on an empty account", async () => {
+    await openDeletionModal()
+
+    expect(screen.getByTestId("delete-modal")).toBeTruthy()
+    expect(alertCalls).toHaveLength(0)
+  })
+
+  /** Deleting an account with money in it burns the balance, so the warning names what is
+   *  about to be lost before the modal is even reachable. */
+  it("warns about the balances before opening the modal", async () => {
+    mockSettingsData = walletsWith(1500, 200)
+    await openDeletionModal()
+
+    expect(screen.queryByTestId("delete-modal")).toBeNull()
+    expect(alertCalls[0]?.title).toBe("Warning")
+    expect(alertCalls[0]?.body).toBe("USD $200\nBTC $1500\nYou still hold a balance")
+
+    await pressAlertButton(0, "Yes")
+
+    expect(screen.getByTestId("delete-modal")).toBeTruthy()
+  })
+
+  it("stays put when the balance warning is dismissed", async () => {
+    mockSettingsData = walletsWith(1500, 0)
+    await openDeletionModal()
+    await pressAlertButton(0, "cancel-from-ll")
+
+    expect(screen.queryByTestId("delete-modal")).toBeNull()
+  })
+
+  it("stacks the confirm and cancel buttons in their own column", async () => {
+    await openDeletionModal()
+
+    const buttons = screen.getByTestId("delete-modal-buttons")
+
+    expect(StyleSheet.flatten(buttons.props.style)).toMatchObject({
+      flexDirection: "column",
+      rowGap: 12,
+    })
+    const [confirm, cancel] = within(buttons).getAllByRole("button")
+    expect(confirm).toBeDisabled()
+    expect(cancel).toBeEnabled()
+  })
+
+  it("keeps the confirm button disabled until the keyword is typed", async () => {
+    await openDeletionModal()
+
+    fireEvent.press(screen.getByText("confirm-from-ll"))
+    expect(alertCalls).toHaveLength(0)
+
+    fireEvent.changeText(screen.getByPlaceholderText("delete"), "delete")
+    await act(async () => {
+      fireEvent.press(screen.getByText("confirm-from-ll"))
+    })
+
+    expect(alertCalls[0]?.title).toBe("Are you sure?")
+  })
+
+  it("closes the modal and empties the field when it is cancelled", async () => {
+    await openDeletionModal()
+    fireEvent.changeText(screen.getByPlaceholderText("delete"), "delete")
+    await act(async () => {
+      fireEvent.press(screen.getByText("cancel-from-ll"))
+    })
+
+    expect(screen.queryByTestId("delete-modal")).toBeNull()
+    expect(mockDeleteAccount).not.toHaveBeenCalled()
+  })
+
+  it("does not delete when the final confirmation is cancelled", async () => {
+    await openDeletionModal()
+    fireEvent.changeText(screen.getByPlaceholderText("delete"), "delete")
+    await act(async () => {
+      fireEvent.press(screen.getByText("confirm-from-ll"))
+    })
+    await pressAlertButton(0, "cancel-from-ll")
+
+    expect(mockDeleteAccount).not.toHaveBeenCalled()
+  })
+
+  /** A deletion in flight cannot be backed out of half-way. The lock takes every exit
+   *  away for as long as it runs (pinned in account-delete-context.spec), so it has to be
+   *  up before the mutation starts. */
+  it("raises the lock before the deletion runs", async () => {
+    let lockedWhenMutationStarted = false
+    mockDeleteAccount.mockImplementation(async () => {
+      lockedWhenMutationStarted = mockSetAccountIsBeingDeleted.mock.calls.some(
+        ([isBeingDeleted]) => isBeingDeleted === true,
+      )
+      return { data: { accountDelete: { success: true, errors: [] } } }
+    })
+    await openDeletionModal()
+    await confirmDeletion()
+
+    expect(lockedWhenMutationStarted).toBe(true)
+  })
+
+  describe("when the deletion succeeds", () => {
+    it("hands the deleted account's token to the profile switch", async () => {
+      await openDeletionModal()
+      await confirmDeletion()
+
+      expect(mockDeleteAccount).toHaveBeenCalledTimes(1)
+      expect(mockSwitchToNextProfile).toHaveBeenCalledWith(
+        "custodial-token",
+        expect.any(Function),
+      )
+    })
+
+    /** The account is gone and the screen under the cover is about to render for the next
+     *  session, so the cover and the blocked exits stay up through the switch. */
+    it("keeps the lock up through the profile switch and the farewell", async () => {
+      let lockReleasedDuringSwitch = false
+      mockSwitchToNextProfile.mockImplementation(async () => {
+        lockReleasedDuringSwitch = wasLockReleased()
+        return SwitchProfileOutcome.Switched
+      })
+      await openDeletionModal()
+      await confirmDeletion()
+      await pressAlertButton(alertCalls.length - 1, "OK")
+
+      expect(lockReleasedDuringSwitch).toBe(false)
+      expect(mockSetAccountIsBeingDeleted).not.toHaveBeenCalledWith(false)
+    })
+
+    /** The lock refuses every way off the screen but its own: the switch's way home is
+     *  handed the lock's way through, not run around it. */
+    it("lets the switch leave the screen only through the lock", async () => {
+      const goHome = jest.fn()
+      mockSwitchToNextProfile.mockImplementation(
+        async (_token: string, leave: (navigate: () => void) => void) => {
+          leave(goHome)
+          return SwitchProfileOutcome.Switched
+        },
+      )
+      await openDeletionModal()
+      await confirmDeletion()
+
+      expect(mockLeaveWhileDeleting).toHaveBeenCalledTimes(1)
+      expect(goHome).toHaveBeenCalledTimes(1)
+    })
+
+    it("leaves for get-started through the lock when it was the last profile", async () => {
+      mockSwitchToNextProfile.mockResolvedValue(SwitchProfileOutcome.NoOtherProfile)
+      await openDeletionModal()
+      await confirmDeletion()
+      expect(mockLeaveWhileDeleting).not.toHaveBeenCalled()
+
+      await pressAlertButton(alertCalls.length - 1, "OK")
+
+      expect(mockLeaveWhileDeleting).toHaveBeenCalledTimes(1)
+      expect(mockReset).toHaveBeenCalledWith({
+        index: 0,
+        routes: [{ name: "getStarted" }],
+      })
+    })
+
+    /** Another profile is left on the device, so the app stays signed in on that one
+     *  instead of dropping the user at the get-started screen. */
+    it("keeps the session when another profile takes over", async () => {
+      await openDeletionModal()
+      await confirmDeletion()
+      await pressAlertButton(alertCalls.length - 1, "OK")
+
+      expect(mockLogout).not.toHaveBeenCalled()
+      expect(mockReset).not.toHaveBeenCalled()
+    })
+
+    it("signs out and returns to get-started when it was the last profile", async () => {
+      mockSwitchToNextProfile.mockResolvedValue(SwitchProfileOutcome.NoOtherProfile)
+      await openDeletionModal()
+      await confirmDeletion()
+
+      expect(mockLogout).toHaveBeenCalledWith({
+        stateToDefault: true,
+        preserveStoredCredentials: false,
+      })
+
+      await pressAlertButton(alertCalls.length - 1, "OK")
+
+      expect(mockReset).toHaveBeenCalledWith({
+        index: 0,
+        routes: [{ name: "getStarted" }],
+      })
+    })
+
+    /** The logout erases every saved session, so it must not run when
+     *  the store could not be read: the profiles it would delete are the ones
+     *  the read never saw. Everything else still signs out. */
+    it("keeps the saved profiles when the store is unreadable, and signs out of the rest", async () => {
+      mockSwitchToNextProfile.mockResolvedValue(SwitchProfileOutcome.ProfilesUnreadable)
+      await openDeletionModal()
+      await confirmDeletion()
+
+      expect(mockLogout).toHaveBeenCalledWith({
+        stateToDefault: true,
+        preserveStoredCredentials: true,
+      })
+
+      await pressAlertButton(alertCalls.length - 1, "OK")
+
+      expect(mockReset).toHaveBeenCalledWith({
+        index: 0,
+        routes: [{ name: "getStarted" }],
+      })
+    })
+
+    /**
+     * The device still stores a wallet the lock guards, so the logout kept it. The landing
+     * screen opens an account and any account lists that wallet, so the farewell has to
+     * lead back to the gate instead.
+     */
+    it("returns to the gate when the logout kept the lock", async () => {
+      mockSwitchToNextProfile.mockResolvedValue(SwitchProfileOutcome.NoOtherProfile)
+      mockLogout.mockResolvedValue({ isAppLockKept: true })
+      await openDeletionModal()
+      await confirmDeletion()
+      await pressAlertButton(alertCalls.length - 1, "OK")
+
+      expect(mockSetAppLocked).toHaveBeenCalledTimes(1)
+      expect(mockReset).toHaveBeenCalledWith({
+        index: 0,
+        routes: [{ name: "authenticationCheck" }],
+      })
+      expect(mockSetAppUnlocked).not.toHaveBeenCalled()
+    })
+
+    /** The switched path runs no logout, so nothing dropped the lock: the session it moved
+     *  to stays in front of it rather than the user being sent anywhere. */
+    it("routes nowhere when another profile took over", async () => {
+      await openDeletionModal()
+      await confirmDeletion()
+      await pressAlertButton(alertCalls.length - 1, "OK")
+
+      expect(mockReset).not.toHaveBeenCalled()
+      expect(mockSetAppLocked).not.toHaveBeenCalled()
+      expect(mockSetAppUnlocked).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("when the server refuses the deletion", () => {
+    it("quotes the server's reason under the generic message", async () => {
+      mockDeleteAccount.mockResolvedValue({
+        data: {
+          accountDelete: { success: false, errors: [{ message: "account is locked" }] },
+        },
+      })
+      await openDeletionModal()
+      await confirmDeletion()
+
+      expect(alertCalls[alertCalls.length - 1]).toMatchObject({
+        title: "Error",
+        body: "Write to connect@afribit.africa\n\naccount is locked",
+      })
+    })
+
+    /** The migration close reads this same payload and treats it as retryable, so it does
+     *  reach this screen: reading the first error unguarded would throw a TypeError here and
+     *  replace the reason with the generic catch-all. */
+    it("falls back to the generic message when the payload carries no reason", async () => {
+      mockDeleteAccount.mockResolvedValue({
+        data: { accountDelete: { success: false, errors: [] } },
+      })
+      await openDeletionModal()
+      await confirmDeletion()
+
+      expect(alertCalls[alertCalls.length - 1]).toMatchObject({
+        title: "Error",
+        body: "Write to connect@afribit.africa",
+      })
+    })
+
+    /** The lock took every way off the screen away; a deletion that did not happen has
+     *  to release it or the user is stuck on a dead screen. */
+    it("gives the user their way off the screen back", async () => {
+      mockDeleteAccount.mockResolvedValue({
+        data: { accountDelete: { success: false, errors: [] } },
+      })
+      await openDeletionModal()
+      await confirmDeletion()
+
+      expect(mockSetAccountIsBeingDeleted).toHaveBeenLastCalledWith(false)
+    })
+  })
+
+  describe("when the mutation throws", () => {
+    beforeEach(() => {
+      jest.spyOn(console, "error").mockImplementation(() => {})
+      mockDeleteAccount.mockRejectedValue(new Error("network down"))
+    })
+
+    it("shows the generic error rather than the crash", async () => {
+      await openDeletionModal()
+      await confirmDeletion()
+
+      expect(alertCalls[alertCalls.length - 1]).toMatchObject({
+        title: "Error",
+        body: "Write to connect@afribit.africa",
+      })
+    })
+
+    it("gives the user their way off the screen back", async () => {
+      await openDeletionModal()
+      await confirmDeletion()
+
+      expect(mockSetAccountIsBeingDeleted).toHaveBeenLastCalledWith(false)
+    })
+  })
+})

@@ -1,0 +1,79 @@
+import React from "react"
+import { TouchableOpacity, View } from "react-native"
+import { makeStyles, Text, useTheme } from "@rn-vui/themed"
+
+import { radius } from "@app/rne-theme/radius"
+import { GaloyIcon, IconNamesType } from "@app/components/atomic/galoy-icon"
+import { staticSurface } from "@app/rne-theme/surfaces"
+import { fonts } from "@app/rne-theme/fonts"
+
+type MultiLineFieldProps = {
+  lines: string[]
+  leftIcon?: IconNamesType
+  rightIcon?: IconNamesType
+  onPress?: () => void
+}
+
+export const MultiLineField: React.FC<MultiLineFieldProps> = ({
+  lines,
+  leftIcon,
+  rightIcon,
+  onPress,
+}) => {
+  const styles = useStyles()
+  const {
+    theme: { colors },
+  } = useTheme()
+
+  const content = (
+    <View style={[styles.container, !onPress && styles.static]}>
+      {leftIcon && <GaloyIcon name={leftIcon} size={16} />}
+      <View style={styles.textContainer}>
+        {lines.map((line, index) => (
+          <Text key={index} style={styles.text}>
+            {line}
+          </Text>
+        ))}
+      </View>
+      {rightIcon && <GaloyIcon name={rightIcon} size={20} color={colors.accent} />}
+    </View>
+  )
+
+  if (onPress) {
+    return (
+      <TouchableOpacity
+        onPress={onPress}
+        activeOpacity={0.7}
+        accessibilityRole="button"
+        accessibilityLabel={lines.join(", ")}
+      >
+        {content}
+      </TouchableOpacity>
+    )
+  }
+
+  return content
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  container: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.surfaceInteractive,
+    borderRadius: radius.default,
+    paddingVertical: 14,
+    paddingLeft: 14,
+    paddingRight: 10,
+    gap: 14,
+  },
+  static: staticSurface(colors),
+  textContainer: {
+    flex: 1,
+  },
+  text: {
+    color: colors.textMuted,
+    fontSize: 14,
+    fontFamily: fonts.regular,
+    lineHeight: 20,
+  },
+}))

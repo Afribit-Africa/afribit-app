@@ -1,0 +1,836 @@
+import {
+  requestInvoiceWithServiceParams,
+  utils,
+  Satoshis,
+  LnUrlPayServiceResponse,
+} from "lnurl-pay"
+import React, { useEffect, useState } from "react"
+import {
+  ActivityIndicator,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
+} from "react-native"
+import ReactNativeModal from "react-native-modal"
+import { gql } from "@apollo/client"
+import { radius } from "@app/rne-theme/radius"
+import { AmountInput } from "@app/components/amount-input/amount-input"
+import { GaloyIcon } from "@app/components/atomic/galoy-icon"
+import { CurrencyPill, useEqualPillWidth } from "@app/components/atomic/currency-pill"
+import { GaloyPrimaryButton } from "@app/components/atomic/galoy-primary-button"
+import { GaloyTertiaryButton } from "@app/components/atomic/galoy-tertiary-button"
+import { NoteInput } from "@app/components/note-input"
+import { PaymentDestinationDisplay } from "@app/components/payment-destination-display"
+import { HiddenBalancePlaceholder } from "@app/components/hidden-balance-placeholder/hidden-balance-placeholder"
+import { Screen } from "@app/components/screen"
+import {
+  useSendBitcoinInternalLimitsQuery,
+  useSendBitcoinWithdrawalLimitsQuery,
+  Wallet,
+  WalletCurrency,
+} from "@app/graphql/generated"
+import { useHideAmount } from "@app/graphql/hide-amount-context"
+import { useIsAuthed } from "@app/graphql/is-authed-context"
+import { useLevel } from "@app/graphql/level-context"
+
+import {
+  decodeInvoiceString,
+  Network as NetworkLibGaloy,
+} from "@blinkbitcoin/blink-client"
+import { NavigationProp, RouteProp, useNavigation } from "@react-navigation/native"
+import { makeStyles, Text, useTheme } from "@rn-vui/themed"
+
+import { useClipboard, usePriceConversion } from "@app/hooks"
+import { useDisplayCurrency } from "@app/hooks/use-display-currency"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { RootStackParamList } from "@app/navigation/stack-param-lists"
+import { prefillMoneyAmount } from "@app/navigation/handoff-prefill"
+import {
+  DisplayCurrency,
+  MoneyAmount,
+  toBtcMoneyAmount,
+  toUsdMoneyAmount,
+  WalletOrDisplayCurrency,
+} from "@app/types/amounts"
+import { reportError } from "@app/utils/error-logging"
+
+import { FeeTierSelector } from "./fee-tier-selector"
+import { shouldWarnAboutHighFee } from "./hooks/onchain-fee-alert"
+import { useOnchainFeeTierOptions } from "./hooks/use-onchain-fee-tier-options"
+import { useSendWallets } from "./hooks/use-send-wallets"
+
+import { testProps } from "../../utils/testProps"
+import { ConfirmFeesModal } from "./confirm-fees-modal"
+import { isValidAmount, withConvertMoneyAmount } from "./payment-details"
+import { PaymentDetail } from "./payment-details/index.types"
+import { SendBitcoinDetailsExtraInfo } from "./send-bitcoin-details-extra-info"
+import { groupTitleGap } from "@app/rne-theme/tokens"
+import { fonts } from "@app/rne-theme/fonts"
+
+gql`
+  query sendBitcoinDetailsScreen {
+    globals {
+      network
+    }
+    me {
+      id
+      defaultAccount {
+        id
+        defaultWalletId
+        wallets {
+          id
+          walletCurrency
+          balance
+        }
+      }
+    }
+  }
+
+  query sendBitcoinWithdrawalLimits {
+    me {
+      id
+      defaultAccount {
+        id
+        limits {
+          withdrawal {
+            totalLimit
+            remainingLimit
+            interval
+          }
+        }
+      }
+    }
+  }
+
+  query sendBitcoinInternalLimits {
+    me {
+      id
+      defaultAccount {
+        id
+        limits {
+          internalSend {
+            totalLimit
+            remainingLimit
+            interval
+          }
+        }
+      }
+    }
+  }
+`
+
+type Props = {
+  route: RouteProp<RootStackParamList, "sendBitcoinDetails">
+}
+
+const SendBitcoinDetailsScreen: React.FC<Props> = ({ route }) => {
+  const {
+    theme: { colors },
+  } = useTheme()
+  const styles = useStyles()
+
+  const navigation =
+    useNavigation<NavigationProp<RootStackParamList, "sendBitcoinDetails">>()
+
+  const { currentLevel } = useLevel()
+
+  const { hideAmount } = useHideAmount()
+
+  const {
+    wallets,
+    defaultWallet,
+    btcWallet,
+    usdWallet,
+    network,
+    isSelfCustodial,
+    loading: isWalletListPending,
+  } = useSendWallets()
+
+  const { formatMoneyAmount } = useDisplayCurrency()
+  const { LL } = useI18nContext()
+  const { copyToClipboard } = useClipboard()
+  const [isLoadingLnurl, setIsLoadingLnurl] = useState(false)
+  const [modalHighFeesVisible, setModalHighFeesVisible] = useState(false)
+
+  const { convertMoneyAmount: _convertMoneyAmount, displayCurrency } =
+    usePriceConversion()
+  const { zeroDisplayAmount, fractionDigits } = useDisplayCurrency()
+  const { paymentDestination, sendingWalletId, prefill } = route.params
+
+  /** The wallet the caller judged able to pay, when it named one the flow offers; the
+   *  flow's own default otherwise. */
+  const requestedWallet = wallets?.find(({ id }) => id === sendingWalletId)
+  const initialWallet = requestedWallet ?? defaultWallet
+
+  const [paymentDetail, setPaymentDetail] =
+    useState<PaymentDetail<WalletCurrency> | null>(null)
+  const {
+    feeTier,
+    setFeeTier,
+    feeTierOptions,
+    feeTierErrorMessage,
+    isFeeTierErrorBlocking,
+    isQuotingFees,
+    isOnchain,
+    selectedTierFee,
+    hasFeeQuote,
+  } = useOnchainFeeTierOptions({
+    paymentDetail,
+    isSelfCustodial,
+    paymentDestination,
+    convertMoneyAmount: _convertMoneyAmount,
+  })
+
+  const handleFeeTierChange = (tier: typeof feeTier) => {
+    const rebuilt = setFeeTier(tier, paymentDetail)
+    if (rebuilt) setPaymentDetail(rebuilt)
+  }
+
+  const { data: withdrawalLimitsData } = useSendBitcoinWithdrawalLimitsQuery({
+    fetchPolicy: "no-cache",
+    skip:
+      !useIsAuthed() ||
+      !paymentDetail?.paymentType ||
+      paymentDetail.paymentType === "intraledger",
+  })
+
+  const { data: intraledgerLimitsData } = useSendBitcoinInternalLimitsQuery({
+    fetchPolicy: "no-cache",
+    skip:
+      !useIsAuthed() ||
+      !paymentDetail?.paymentType ||
+      paymentDetail.paymentType !== "intraledger",
+  })
+
+  const [isModalVisible, setIsModalVisible] = useState(false)
+  const [asyncErrorMessage, setAsyncErrorMessage] = useState("")
+  const { widthStyle: pillWidthStyle, onPillLayout } = useEqualPillWidth()
+
+  /** Keeps the payment detail on the current rate. A change of display currency, which is
+   *  what sats-only mode starting or ending is, also moves the amount already typed. */
+  useEffect(() => {
+    if (!_convertMoneyAmount) {
+      return
+    }
+
+    setPaymentDetail(
+      (paymentDetail) =>
+        paymentDetail &&
+        withConvertMoneyAmount(paymentDetail, _convertMoneyAmount, displayCurrency),
+    )
+  }, [_convertMoneyAmount, displayCurrency, setPaymentDetail])
+
+  // we set the default values when the screen loads
+  // this only run once (doesn't re-run after paymentDetail is set)
+  useEffect(() => {
+    /**
+     * The wallet list is not final until the region resolves: a restricted verdict drops the
+     * dollar wallet from it. Seeding before that picks a `defaultWallet` the verdict is about
+     * to withdraw, and this effect never runs again once `paymentDetail` is set, so the
+     * screen would go on sending from a wallet it no longer offers.
+     */
+    if (paymentDetail || !initialWallet || !_convertMoneyAmount || isWalletListPending) {
+      return
+    }
+
+    let initialPaymentDetail = paymentDestination.createPaymentDetail({
+      convertMoneyAmount: _convertMoneyAmount,
+      sendingWalletDescriptor: {
+        id: initialWallet.id,
+        currency: initialWallet.walletCurrency,
+      },
+    })
+
+    // Start with usd as the unit of account
+    if (initialPaymentDetail.canSetAmount) {
+      initialPaymentDetail = initialPaymentDetail.setAmount(zeroDisplayAmount)
+    }
+
+    // A shell hand-off (a Chat contact payment) starts at its amount and note, which the
+    // user can still change. A destination that sets its own amount or note keeps it.
+    const prefillAmount =
+      prefill?.amount &&
+      prefillMoneyAmount(prefill.amount, displayCurrency, fractionDigits)
+    if (prefillAmount && initialPaymentDetail.canSetAmount) {
+      initialPaymentDetail = initialPaymentDetail.setAmount(prefillAmount)
+    }
+    if (prefill?.note && initialPaymentDetail.canSetMemo && initialPaymentDetail.setMemo) {
+      initialPaymentDetail = initialPaymentDetail.setMemo(prefill.note)
+    }
+
+    setPaymentDetail(initialPaymentDetail)
+  }, [
+    setPaymentDetail,
+    paymentDestination,
+    _convertMoneyAmount,
+    paymentDetail,
+    initialWallet,
+    btcWallet,
+    zeroDisplayAmount,
+    isWalletListPending,
+    prefill,
+    displayCurrency,
+    fractionDigits,
+  ])
+
+  const alertHighFees = shouldWarnAboutHighFee({
+    paymentDetail,
+    isSelfCustodial,
+    selectedTierFee,
+    hasFeeQuote,
+  })
+
+  /** Held rather than blanked: the seeding above waits for the region, so without this the
+   *  user sits on an empty screen for as long as the country takes to resolve. */
+  if (isWalletListPending) {
+    return (
+      <Screen>
+        <View style={styles.walletListPendingContainer}>
+          <ActivityIndicator
+            size="large"
+            color={colors.accent}
+            {...testProps("send-wallet-list-pending")}
+          />
+        </View>
+      </Screen>
+    )
+  }
+
+  if (!paymentDetail) {
+    return <></>
+  }
+
+  const { sendingWalletDescriptor, convertMoneyAmount } = paymentDetail
+  const lnurlParams =
+    paymentDetail?.paymentType === "lnurl" ? paymentDetail?.lnurlParams : undefined
+
+  const btcBalanceMoneyAmount = toBtcMoneyAmount(btcWallet?.balance)
+
+  const usdBalanceMoneyAmount = toUsdMoneyAmount(usdWallet?.balance)
+
+  const sendingWalletBalance =
+    sendingWalletDescriptor.currency === WalletCurrency.Btc
+      ? btcBalanceMoneyAmount
+      : usdBalanceMoneyAmount
+
+  const btcPrimaryText = formatMoneyAmount({ moneyAmount: btcBalanceMoneyAmount })
+  const btcSecondaryText = formatMoneyAmount({
+    moneyAmount: convertMoneyAmount(btcBalanceMoneyAmount, DisplayCurrency),
+    isApproximate: true,
+  })
+
+  const usdPrimaryText = formatMoneyAmount({ moneyAmount: usdBalanceMoneyAmount })
+  const usdSecondaryText = formatMoneyAmount({
+    moneyAmount: convertMoneyAmount(usdBalanceMoneyAmount, WalletCurrency.Btc),
+    isApproximate: true,
+  })
+
+  const amountStatus = isValidAmount({
+    paymentDetail,
+    usdWalletAmount: usdBalanceMoneyAmount,
+    btcWalletAmount: btcBalanceMoneyAmount,
+    intraledgerLimits: intraledgerLimitsData?.me?.defaultAccount?.limits?.internalSend,
+    withdrawalLimits: withdrawalLimitsData?.me?.defaultAccount?.limits?.withdrawal,
+  })
+
+  const toggleModal = () => {
+    setIsModalVisible(!isModalVisible)
+  }
+
+  const handleCopyToClipboard = () => {
+    copyToClipboard({
+      content: paymentDetail.destination,
+      message: LL.SendBitcoinScreen.copiedDestination(),
+    })
+  }
+
+  const chooseWallet = (wallet: Pick<Wallet, "id" | "walletCurrency">) => {
+    let updatedPaymentDetail = paymentDetail.setSendingWalletDescriptor({
+      id: wallet.id,
+      currency: wallet.walletCurrency,
+    })
+
+    // switch back to the display currency
+    if (updatedPaymentDetail.canSetAmount) {
+      const displayAmount = updatedPaymentDetail.convertMoneyAmount(
+        paymentDetail.unitOfAccountAmount,
+        DisplayCurrency,
+      )
+      updatedPaymentDetail = updatedPaymentDetail.setAmount(displayAmount)
+    }
+
+    setPaymentDetail(updatedPaymentDetail)
+    toggleModal()
+  }
+
+  const transactionType = () => {
+    if (paymentDetail?.paymentType === "intraledger") return LL.common.intraledger()
+    if (paymentDetail?.paymentType === "onchain") return LL.common.onchain()
+    if (paymentDetail?.paymentType === "lightning") return LL.common.lightning()
+    if (paymentDetail?.paymentType === "lnurl") return LL.common.lightning()
+    if (paymentDetail?.paymentType === "spark") return LL.common.spark()
+  }
+
+  const ChooseWalletModal = wallets && (
+    <ReactNativeModal
+      style={styles.modal}
+      animationIn="fadeInDown"
+      animationOut="fadeOutUp"
+      isVisible={isModalVisible}
+      onBackButtonPress={toggleModal}
+      onBackdropPress={toggleModal}
+    >
+      <View>
+        {wallets.map((wallet) => {
+          return (
+            <TouchableWithoutFeedback
+              key={wallet.id}
+              {...testProps(wallet.walletCurrency)}
+              onPress={() => {
+                chooseWallet(wallet)
+              }}
+            >
+              <View style={styles.walletContainer}>
+                <View style={styles.walletSelectorTypeContainer}>
+                  <CurrencyPill
+                    currency={wallet.walletCurrency}
+                    containerSize="medium"
+                    containerStyle={pillWidthStyle}
+                    onLayout={onPillLayout(wallet.walletCurrency)}
+                  />
+                </View>
+                <View style={styles.walletSelectorInfoContainer}>
+                  <View style={styles.walletSelectorTypeTextContainer}>
+                    {wallet.walletCurrency === WalletCurrency.Btc ? (
+                      <Text style={styles.walletCurrencyText}>{btcPrimaryText}</Text>
+                    ) : (
+                      <Text style={styles.walletCurrencyText}>{usdPrimaryText}</Text>
+                    )}
+                  </View>
+                  <View style={styles.walletSelectorBalanceContainer}>
+                    {wallet.walletCurrency === WalletCurrency.Btc ? (
+                      <Text>{btcSecondaryText}</Text>
+                    ) : (
+                      <Text>{usdSecondaryText}</Text>
+                    )}
+                  </View>
+                  <View />
+                </View>
+              </View>
+            </TouchableWithoutFeedback>
+          )
+        })}
+      </View>
+    </ReactNativeModal>
+  )
+
+  const goToNextScreen =
+    (paymentDetail.sendPaymentMutation ||
+      (paymentDetail.paymentType === "lnurl" && paymentDetail.unitOfAccountAmount)) &&
+    (async () => {
+      let paymentDetailForConfirmation: PaymentDetail<WalletCurrency> = paymentDetail
+
+      if (paymentDetail.paymentType === "lnurl" && !paymentDetail.sendPaymentMutation) {
+        try {
+          setIsLoadingLnurl(true)
+
+          const btcAmount = paymentDetail.convertMoneyAmount(
+            paymentDetail.unitOfAccountAmount,
+            "BTC",
+          )
+
+          // Pay with the service params resolveLnurlDestination already vetted.
+          // requestInvoice(lnUrlOrAddress) would resolve the destination a second
+          // time and fetch whatever callback that response carries, which lnurl-pay
+          // does not require to be https — so the callback the app checked would
+          // not be the callback it pays.
+          if (!lnurlParams) {
+            setIsLoadingLnurl(false)
+            setAsyncErrorMessage(LL.SendBitcoinScreen.failedToFetchLnurlInvoice())
+            return
+          }
+
+          const requestInvoiceParams: {
+            params: LnUrlPayServiceResponse
+            tokens: Satoshis
+            comment?: string
+          } = {
+            params: lnurlParams,
+            tokens: utils.toSats(btcAmount.amount),
+          }
+
+          if (lnurlParams?.commentAllowed) {
+            requestInvoiceParams.comment = paymentDetail.comment
+          }
+
+          const result = await requestInvoiceWithServiceParams(requestInvoiceParams)
+
+          setPaymentDetail(paymentDetail.setSuccessAction(result.successAction))
+
+          setIsLoadingLnurl(false)
+          const invoice = result.invoice
+          const decodedInvoice = decodeInvoiceString(invoice, network as NetworkLibGaloy)
+
+          if (
+            Math.round(Number(decodedInvoice.millisatoshis) / 1000) !== btcAmount.amount
+          ) {
+            setAsyncErrorMessage(LL.SendBitcoinScreen.lnurlInvoiceIncorrectAmount())
+            return
+          }
+
+          paymentDetailForConfirmation = {
+            ...paymentDetail.setInvoice({
+              paymentRequest: invoice,
+              paymentRequestAmount: btcAmount,
+            }),
+            successAction: result.successAction,
+          }
+        } catch (error) {
+          setIsLoadingLnurl(false)
+          reportError("send-bitcoin-details", error)
+          setAsyncErrorMessage(LL.SendBitcoinScreen.failedToFetchLnurlInvoice())
+          return
+        }
+      }
+
+      if (paymentDetailForConfirmation.sendPaymentMutation) {
+        if (alertHighFees) {
+          setModalHighFeesVisible(true)
+        } else {
+          navigation.navigate("sendBitcoinConfirmation", {
+            paymentDetail: paymentDetailForConfirmation,
+          })
+        }
+      }
+    })
+
+  /**
+   * Held while the quote is out, because the high-fee warning is judged by the fee the
+   * selector quoted: leaving before it lands is leaving without the warning. The fee this
+   * screen probed on mount used to stand in for it, which the picked tier's own fee replaced.
+   */
+  const isNextDisabled =
+    !goToNextScreen ||
+    !amountStatus.validAmount ||
+    isFeeTierErrorBlocking ||
+    isQuotingFees
+
+  /**
+   * The extra-info box shows one message, and an invalid amount is the one the sender can
+   * act on. A fee error only takes the box once the amount is valid, or when it blocks the
+   * send outright, since then there is nothing to continue to whatever the amount reads.
+   */
+  const shouldShowFeeTierError = amountStatus.validAmount || isFeeTierErrorBlocking
+  const extraInfoErrorMessage =
+    asyncErrorMessage || (shouldShowFeeTierError ? feeTierErrorMessage : undefined)
+
+  const setAmount = (moneyAmount: MoneyAmount<WalletOrDisplayCurrency>) => {
+    setPaymentDetail((paymentDetail) =>
+      paymentDetail?.setAmount ? paymentDetail.setAmount(moneyAmount) : paymentDetail,
+    )
+  }
+
+  const sendAll = () => {
+    let moneyAmount: MoneyAmount<WalletCurrency>
+
+    if (paymentDetail.sendingWalletDescriptor.currency === WalletCurrency.Btc) {
+      moneyAmount = {
+        amount: btcWallet?.balance ?? 0,
+        currency: WalletCurrency.Btc,
+        currencyCode: "BTC",
+      }
+    } else {
+      moneyAmount = {
+        amount: usdWallet?.balance ?? 0,
+        currency: WalletCurrency.Usd,
+        currencyCode: "USD",
+      }
+    }
+
+    setPaymentDetail((paymentDetail) =>
+      paymentDetail?.setAmount
+        ? paymentDetail.setAmount(moneyAmount, true)
+        : paymentDetail,
+    )
+  }
+
+  return (
+    <Screen
+      preset="scroll"
+      style={styles.screenStyle}
+      keyboardOffset="navigationHeader"
+      keyboardShouldPersistTaps="handled"
+    >
+      <ConfirmFeesModal
+        action={() => {
+          setModalHighFeesVisible(false)
+          navigation.navigate("sendBitcoinConfirmation", { paymentDetail })
+        }}
+        isVisible={modalHighFeesVisible}
+        cancel={() => setModalHighFeesVisible(false)}
+      />
+      <View style={styles.sendBitcoinAmountContainer}>
+        <View style={styles.fieldContainer}>
+          <Text style={styles.fieldTitleText}>
+            {LL.SendBitcoinScreen.destination()} - {transactionType()}
+          </Text>
+          <View style={styles.destinationFieldContainer}>
+            <View style={styles.disabledFieldBackground}>
+              <PaymentDestinationDisplay
+                destination={paymentDetail.destination}
+                paymentType={paymentDetail.paymentType}
+              />
+            </View>
+            <TouchableOpacity
+              style={styles.iconContainer}
+              onPress={handleCopyToClipboard}
+              hitSlop={30}
+            >
+              <GaloyIcon name={"copy-paste"} size={18} color={colors.accent} />
+            </TouchableOpacity>
+          </View>
+        </View>
+        <View style={styles.fieldContainer}>
+          <Text style={styles.fieldTitleText}>{LL.common.from()}</Text>
+          <TouchableWithoutFeedback
+            {...testProps("choose-wallet-to-send-from")}
+            onPress={toggleModal}
+            accessible={false}
+          >
+            <View style={styles.fieldBackground}>
+              <View style={styles.walletSelectorTypeContainer}>
+                <CurrencyPill
+                  currency={sendingWalletDescriptor.currency}
+                  containerSize="medium"
+                  containerStyle={pillWidthStyle}
+                  onLayout={onPillLayout(sendingWalletDescriptor.currency)}
+                />
+              </View>
+              <View
+                style={
+                  hideAmount
+                    ? styles.walletSelectorInfoContainerHidden
+                    : styles.walletSelectorInfoContainer
+                }
+              >
+                {hideAmount ? (
+                  <HiddenBalancePlaceholder size="small" />
+                ) : (
+                  <>
+                    <View style={styles.walletSelectorTypeTextContainer}>
+                      {sendingWalletDescriptor.currency === WalletCurrency.Btc ? (
+                        <Text style={styles.walletCurrencyText}>{btcPrimaryText}</Text>
+                      ) : (
+                        <Text style={styles.walletCurrencyText}>{usdPrimaryText}</Text>
+                      )}
+                    </View>
+                    <View style={styles.walletSelectorBalanceContainer}>
+                      <Text
+                        {...testProps(
+                          `${sendingWalletDescriptor.currency} Wallet Balance`,
+                        )}
+                      >
+                        {sendingWalletDescriptor.currency === WalletCurrency.Btc
+                          ? btcSecondaryText
+                          : usdSecondaryText}
+                      </Text>
+                    </View>
+                  </>
+                )}
+              </View>
+
+              <View style={styles.pickWalletIcon}>
+                <GaloyIcon name={"caret-down"} size={24} color={colors.accent} />
+              </View>
+            </View>
+          </TouchableWithoutFeedback>
+          {ChooseWalletModal}
+        </View>
+        <View style={styles.fieldContainer}>
+          <View style={styles.amountRightMaxField}>
+            <Text {...testProps(LL.SendBitcoinScreen.amount())} style={styles.amountText}>
+              {LL.SendBitcoinScreen.amount()}
+            </Text>
+            {paymentDetail.canSendMax && !paymentDetail.isSendingMax && (
+              <GaloyTertiaryButton
+                clear
+                title={LL.SendBitcoinScreen.maxAmount()}
+                onPress={sendAll}
+              />
+            )}
+          </View>
+          <View style={styles.currencyInputContainer}>
+            <AmountInput
+              unitOfAccountAmount={paymentDetail.unitOfAccountAmount}
+              setAmount={setAmount}
+              convertMoneyAmount={paymentDetail.convertMoneyAmount}
+              walletCurrency={sendingWalletDescriptor.currency}
+              canSetAmount={paymentDetail.canSetAmount}
+              isSendingMax={paymentDetail.isSendingMax}
+              maxAmount={
+                lnurlParams?.max
+                  ? toBtcMoneyAmount(lnurlParams.max)
+                  : sendingWalletBalance
+              }
+              maxAmountIsBalance={!lnurlParams?.max}
+              minAmount={lnurlParams?.min ? toBtcMoneyAmount(lnurlParams.min) : undefined}
+            />
+          </View>
+        </View>
+        {isOnchain && (
+          <View style={styles.fieldContainer}>
+            <FeeTierSelector
+              title={LL.SendBitcoinScreen.feeTier()}
+              options={feeTierOptions}
+              selected={feeTier}
+              onSelect={handleFeeTierChange}
+              loading={isQuotingFees}
+            />
+          </View>
+        )}
+        <View style={styles.fieldContainer}>
+          <Text style={styles.fieldTitleText}>{LL.SendBitcoinScreen.note()}</Text>
+          <NoteInput
+            onChangeText={(text) =>
+              paymentDetail.setMemo && setPaymentDetail(paymentDetail.setMemo(text))
+            }
+            value={paymentDetail.memo || ""}
+            editable={paymentDetail.canSetMemo}
+          />
+        </View>
+        <SendBitcoinDetailsExtraInfo
+          errorMessage={extraInfoErrorMessage}
+          amountStatus={amountStatus}
+          currentLevel={currentLevel}
+        />
+        <View style={styles.buttonContainer}>
+          <GaloyPrimaryButton
+            onPress={goToNextScreen || undefined}
+            loading={isLoadingLnurl}
+            disabled={isNextDisabled}
+            title={LL.common.next()}
+          />
+        </View>
+      </View>
+    </Screen>
+  )
+}
+
+export default SendBitcoinDetailsScreen
+
+const useStyles = makeStyles(({ colors }) => ({
+  walletListPendingContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  sendBitcoinAmountContainer: {
+    flex: 1,
+  },
+  fieldBackground: {
+    flexDirection: "row",
+    borderStyle: "solid",
+    overflow: "hidden",
+    backgroundColor: colors.surfaceInteractive,
+    borderRadius: radius.default,
+    alignItems: "center",
+    padding: 14,
+    minHeight: 60,
+  },
+  destinationFieldContainer: {
+    flexDirection: "row",
+    borderStyle: "solid",
+    overflow: "hidden",
+    backgroundColor: colors.surfaceInteractive,
+    borderRadius: radius.default,
+    alignItems: "center",
+    padding: 14,
+    minHeight: 60,
+  },
+  disabledFieldBackground: {
+    flex: 1,
+    opacity: 0.5,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  walletContainer: {
+    flexDirection: "row",
+    borderStyle: "solid",
+    overflow: "hidden",
+    backgroundColor: colors.surfaceInteractive,
+    paddingHorizontal: 14,
+    borderRadius: radius.default,
+    alignItems: "center",
+    marginBottom: 10,
+    minHeight: 60,
+  },
+  walletSelectorTypeContainer: {
+    justifyContent: "center",
+    alignItems: "flex-start",
+    marginRight: 28,
+  },
+  walletSelectorInfoContainer: {
+    flex: 1,
+    flexDirection: "column",
+  },
+  walletSelectorInfoContainerHidden: {
+    flex: 1,
+    justifyContent: "center",
+  },
+  walletCurrencyText: {
+    fontFamily: fonts.bold,
+    fontSize: 18,
+  },
+  walletSelectorTypeTextContainer: {
+    flex: 1,
+    justifyContent: "flex-end",
+  },
+  walletSelectorBalanceContainer: {
+    flex: 1,
+    flexDirection: "row",
+  },
+  fieldTitleText: {
+    color: colors.textSecondary,
+    fontFamily: fonts.bold,
+    marginBottom: groupTitleGap,
+  },
+  fieldContainer: {
+    marginBottom: 12,
+  },
+  currencyInputContainer: {
+    flexDirection: "column",
+  },
+  switchCurrencyIconContainer: {
+    width: 50,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  buttonContainer: {
+    flex: 1,
+    justifyContent: "flex-end",
+  },
+  modal: {
+    marginBottom: "90%",
+  },
+  pickWalletIcon: {
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  screenStyle: {
+    padding: 20,
+    flexGrow: 1,
+  },
+  amountText: {
+    fontFamily: fonts.bold,
+  },
+  amountRightMaxField: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  iconContainer: {
+    justifyContent: "center",
+    alignItems: "flex-start",
+    paddingLeft: 20,
+  },
+}))

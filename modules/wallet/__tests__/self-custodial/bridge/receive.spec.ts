@@ -1,0 +1,188 @@
+import type { BreezSdkInterface } from "@breeztech/breez-sdk-spark-react-native"
+
+import { WalletCurrency } from "@app/graphql/generated"
+import {
+  createReceiveLightning,
+  createReceiveOnchain,
+} from "@app/self-custodial/bridge/receive"
+
+jest.mock("@breeztech/breez-sdk-spark-react-native", () => ({
+  ReceivePaymentRequest: { create: (p: Record<string, unknown>) => p },
+  ReceivePaymentMethod: {
+    BitcoinAddress: jest
+      .fn()
+      .mockImplementation((inner: unknown) => ({ tag: "BitcoinAddress", inner })),
+    Bolt11Invoice: jest
+      .fn()
+      .mockImplementation((inner: unknown) => ({ tag: "Bolt11Invoice", inner })),
+  },
+}))
+
+const mockMeasure = jest.fn()
+jest.mock("@app/self-custodial/measurement", () => ({
+  ...jest.requireActual("@app/self-custodial/measurement"),
+  measure: (...args: unknown[]) => mockMeasure(...args),
+}))
+
+const buildSdk = (paymentRequest = "bc1qaddress") => {
+  const receivePayment = jest.fn().mockResolvedValue({ paymentRequest })
+  return { sdk: { receivePayment } as unknown as BreezSdkInterface, receivePayment }
+}
+
+const methodInnerOf = (receivePayment: jest.Mock) =>
+  receivePayment.mock.calls[0][0].paymentMethod.inner
+
+describe("createReceiveOnchain", () => {
+  it("reuses the existing deposit address when called without params", async () => {
+    const { sdk, receivePayment } = buildSdk()
+
+    const result = await createReceiveOnchain(sdk)()
+
+    expect(result).toEqual({ address: "bc1qaddress" })
+    expect(methodInnerOf(receivePayment)).toEqual({ newAddress: undefined })
+  })
+
+  it("reuses the existing deposit address when rotation is not requested", async () => {
+    const { sdk, receivePayment } = buildSdk()
+
+    await createReceiveOnchain(sdk)({ newAddress: false })
+
+    expect(methodInnerOf(receivePayment)).toEqual({ newAddress: false })
+  })
+
+  it("asks the SDK to rotate when a fresh address is requested", async () => {
+    const { sdk, receivePayment } = buildSdk("bc1qrotated")
+
+    const result = await createReceiveOnchain(sdk)({ newAddress: true })
+
+    expect(result).toEqual({ address: "bc1qrotated" })
+    expect(methodInnerOf(receivePayment)).toEqual({ newAddress: true })
+  })
+
+  it("hands the caller's abort signal to the SDK call", async () => {
+    const { sdk, receivePayment } = buildSdk()
+    const controller = new AbortController()
+
+    await createReceiveOnchain(sdk, { signal: controller.signal })({ newAddress: true })
+
+    expect(receivePayment.mock.calls[0][1]).toEqual({ signal: controller.signal })
+  })
+
+  it("passes no abort options when the caller has no signal", async () => {
+    const { sdk, receivePayment } = buildSdk()
+
+    await createReceiveOnchain(sdk)({ newAddress: true })
+
+    expect(receivePayment.mock.calls[0][1]).toBeUndefined()
+  })
+
+  it("returns an error result when the SDK rejects", async () => {
+    const receivePayment = jest.fn().mockRejectedValue(new Error("sdk offline"))
+    const sdk = { receivePayment } as unknown as BreezSdkInterface
+
+    const result = await createReceiveOnchain(sdk)({ newAddress: true })
+
+    expect(result.address).toBeUndefined()
+    expect(result.errors?.[0]?.message).toBe("sdk offline")
+  })
+
+  it("describes a non-Error rejection", async () => {
+    const receivePayment = jest.fn().mockRejectedValue("plain string blowup")
+    const sdk = { receivePayment } as unknown as BreezSdkInterface
+
+    const result = await createReceiveOnchain(sdk)()
+
+    expect(result.errors?.[0]?.message).toBe(
+      "Address generation failed: plain string blowup",
+    )
+  })
+})
+
+describe("createReceiveLightning", () => {
+  const btcAmount = (amount: number) => ({
+    amount,
+    currency: WalletCurrency.Btc,
+    currencyCode: "BTC" as const,
+  })
+
+  it("passes amount, memo and expiry through to the SDK, naming no other receiver", async () => {
+    const { sdk, receivePayment } = buildSdk("lnbc1invoice")
+
+    const result = await createReceiveLightning(sdk)({
+      amount: btcAmount(5000),
+      memo: "coffee",
+      expirySecs: 600,
+    })
+
+    expect(result).toEqual({ invoice: "lnbc1invoice" })
+    expect(methodInnerOf(receivePayment)).toStrictEqual({
+      description: "coffee",
+      amountSats: BigInt(5000),
+      expirySecs: 600,
+      paymentHash: undefined,
+      preimage: undefined,
+      receiverIdentityPublicKey: undefined,
+    })
+  })
+
+  it("sends an empty description and no amount for a bare invoice", async () => {
+    const { sdk, receivePayment } = buildSdk()
+
+    await createReceiveLightning(sdk)({})
+
+    expect(methodInnerOf(receivePayment)).toStrictEqual({
+      description: "",
+      amountSats: undefined,
+      expirySecs: undefined,
+      paymentHash: undefined,
+      preimage: undefined,
+      receiverIdentityPublicKey: undefined,
+    })
+  })
+
+  it("returns an error result when the SDK rejects", async () => {
+    const receivePayment = jest.fn().mockRejectedValue(new Error("no route"))
+    const sdk = { receivePayment } as unknown as BreezSdkInterface
+
+    const result = await createReceiveLightning(sdk)({})
+
+    expect(result.invoice).toBeUndefined()
+    expect(result.errors?.[0]?.message).toBe("no route")
+  })
+
+  it("describes a non-Error rejection", async () => {
+    const receivePayment = jest.fn().mockRejectedValue("plain string blowup")
+    const sdk = { receivePayment } as unknown as BreezSdkInterface
+
+    const result = await createReceiveLightning(sdk)({})
+
+    expect(result.errors?.[0]?.message).toBe("Receive failed: plain string blowup")
+  })
+})
+
+describe("receive request telemetry", () => {
+  beforeEach(() => {
+    mockMeasure.mockClear()
+  })
+
+  it("counts each invoice it creates", async () => {
+    const { sdk } = buildSdk("lnbc1invoice")
+
+    await createReceiveLightning(sdk)({ amount: undefined, memo: undefined })
+
+    expect(mockMeasure).toHaveBeenCalledWith("sc_payment_request_created", {
+      rail: "bolt11",
+      // eslint-disable-next-line camelcase
+      has_amount: false,
+    })
+  })
+
+  it("leaves on-chain counting to the receive flow, which knows a new address from a shown one", async () => {
+    const { sdk } = buildSdk()
+
+    const result = await createReceiveOnchain(sdk)()
+
+    expect(result).toEqual({ address: "bc1qaddress" })
+    expect(mockMeasure).not.toHaveBeenCalled()
+  })
+})

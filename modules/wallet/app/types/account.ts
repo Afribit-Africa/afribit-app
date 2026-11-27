@@ -1,0 +1,87 @@
+export const AccountTypeMode = {
+  Create: "create",
+  Restore: "restore",
+} as const
+
+export type AccountTypeMode = (typeof AccountTypeMode)[keyof typeof AccountTypeMode]
+
+/**
+ * The self-custodial region posture: Enhanced consents to a connection check for
+ * region-permitted features; Anon runs no check, Bitcoin only. Absent = not yet chosen,
+ * and absent persists on fully onboarded accounts: restore activates the account before
+ * showing the mode screen and has no resume back onto it, so a kill there leaves no entry
+ * and nothing asks again. Consumers must handle an unset mode rather than assume
+ * onboarding recorded one.
+ */
+export const AccountMode = {
+  Enhanced: "enhanced",
+  Anon: "anon",
+} as const
+
+export type AccountMode = (typeof AccountMode)[keyof typeof AccountMode]
+
+/** Product mode names, never localized. The stored value stays `anon`: the rename to
+ *  Incognito is what the user reads, not what the account records. */
+export const ACCOUNT_MODE_NAMES: Record<AccountMode, string> = {
+  [AccountMode.Enhanced]: "Enhanced",
+  [AccountMode.Anon]: "Incognito",
+}
+
+/**
+ * Why account creation was refused, which decides what the unsupported-region screen
+ * offers: a whole region closed to us leaves nothing, while only the first Blink account
+ * being refused still leaves self-custodial on the table.
+ */
+export const CreationBlockReason = {
+  Region: "region",
+  FirstCustodialSignup: "firstCustodialSignup",
+  /** The location never resolved, so compliance could not be checked either way. */
+  UnknownRegion: "unknownRegion",
+} as const
+
+export type CreationBlockReason =
+  (typeof CreationBlockReason)[keyof typeof CreationBlockReason]
+
+/** What an account may not do where it is. The field names are the server's. */
+export type Restrictions = {
+  dollarBalance: boolean
+  transfer: boolean
+}
+
+/**
+ * Where the server's restriction verdict stands. A request that never came back is not an
+ * answer, so it is kept apart from one: `Unknown` means asking has stopped working for now,
+ * never that the server restricted anything.
+ */
+export const RestrictionVerdictStatus = {
+  /** No Blink account is behind the session, so there is nobody to ask about. */
+  NoAccount: "noAccount",
+  Pending: "pending",
+  Served: "served",
+  Unknown: "unknown",
+} as const
+
+export type RestrictionVerdictStatus =
+  (typeof RestrictionVerdictStatus)[keyof typeof RestrictionVerdictStatus]
+
+export type RestrictionVerdict =
+  | { status: typeof RestrictionVerdictStatus.NoAccount }
+  | { status: typeof RestrictionVerdictStatus.Pending }
+  | { status: typeof RestrictionVerdictStatus.Served; restrictions: Restrictions }
+  | { status: typeof RestrictionVerdictStatus.Unknown }
+
+/**
+ * Why an availability gate is closed, for the surface that has to say so. `UnknownRegion`
+ * is the one that is not a decision: the region was never determined, so the feature is
+ * withheld by policy while nothing about where the user is has been established. Copy
+ * that reads it as a restriction accuses a user nobody restricted.
+ */
+export const GateReason = {
+  /** The network has no dollar token (Staging, unless the build names one). */
+  Network: "network",
+  Anon: "anon",
+  Region: "region",
+  UnknownRegion: "unknownRegion",
+} as const
+
+export type GateReason = (typeof GateReason)[keyof typeof GateReason]

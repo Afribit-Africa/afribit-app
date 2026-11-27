@@ -1,0 +1,216 @@
+import { useCallback, useRef, useState } from "react"
+
+import { useFocusEffect } from "@react-navigation/native"
+
+import { useAppConfig } from "@app/hooks/use-app-config"
+import { reportError } from "@app/utils/error-logging"
+import {
+  classifyStorageFailure,
+  StorageFailure,
+  type StorageWriteResult,
+} from "@app/utils/storage/storage-failure"
+
+import {
+  MigrationCheckpoint,
+  type StoredCheckpoint,
+  clearCheckpointFromStorage,
+  getStorageKey,
+  isCommitPointCheckpoint,
+  loadCheckpoint,
+  saveCheckpointToStorage,
+} from "../utils/migration-checkpoint-storage"
+
+import { useCustodialOwnerId } from "./use-custodial-owner-id"
+
+/** Named rather than positional so a caller setting only one field does not pass a
+ *  placeholder for the other. */
+type SaveCheckpointOptions = {
+  provisionedAccountId?: string
+  expectedReceiveSats?: number
+  /** Marks this run's start as accepted by the server. Never re-sent from what the hook
+   *  holds: the record keeps it for the run, and only the caller that saw the start may
+   *  set it. */
+  isStartConfirmed?: true
+  /** The server reports this account's migration not started, read by the caller just
+   *  before the save. Never re-sent either: an answer goes stale. */
+  isServerFlowUnstarted?: true
+  /** The caller read this figure again after a deposit cleared, while the server still
+   *  waited for a destination. Never re-sent either, for the same reason. */
+  isReceiveFigureRefreshed?: true
+}
+
+/**
+ * The persisted migration checkpoint's state and writes, free of any navigation
+ * coupling so pure-logic consumers (backup routing, the session swap) can read the
+ * resume state without instantiating a navigator-bound hook.
+ */
+export const useMigrationCheckpointState = () => {
+  const {
+    ownerId,
+    loading: ownerLoading,
+    refetch: refetchOwnerId,
+  } = useCustodialOwnerId()
+  const [stored, setStored] = useState<StoredCheckpoint | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [hasError, setHasError] = useState(false)
+  const [storageFailure, setStorageFailure] = useState<StorageFailure | null>(null)
+  const isFocusedRef = useRef(true)
+
+  const {
+    appConfig: {
+      galoyInstance: { name: environment },
+    },
+  } = useAppConfig()
+
+  const storageKey = getStorageKey(environment)
+
+  /** The error only clears on a read that succeeds, never at the start of one: a retry
+   *  that cleared it up front would hand consumers the still-empty state as settled data
+   *  for the length of the read, and the gate would act on it (the handover this flag
+   *  exists to hold back). Resolves instead of rejecting; the failure already traveled
+   *  through reportError and hasError. */
+  const load = useCallback(
+    (): Promise<void> =>
+      loadCheckpoint(storageKey)
+        .then((storedCheckpoint) => {
+          if (!isFocusedRef.current) return
+          setStored(storedCheckpoint ?? null)
+          setHasError(false)
+          setStorageFailure(null)
+          setLoading(false)
+        })
+        .catch((err) => {
+          reportError("Checkpoint load", err)
+          if (!isFocusedRef.current) return
+          setHasError(true)
+          setStorageFailure(classifyStorageFailure(err))
+          setLoading(false)
+        }),
+    [storageKey],
+  )
+
+  /** The owner query joins the reload because the ids below are keyed by it, and this hook
+   *  resolves it on its OWN uncached instance: it can fail while a caller's separate
+   *  instance is healthy, and then every id reads null with nothing but the storage read to
+   *  retry. Reloading storage alone would replay that same null forever. Swallowed like the
+   *  load, so the caller keeps one promise that resolves whatever failed. */
+  const reload = useCallback(async (): Promise<void> => {
+    await Promise.all([load(), refetchOwnerId().catch(() => undefined)])
+  }, [load, refetchOwnerId])
+
+  const reloadCheckpoint = useCallback(() => {
+    isFocusedRef.current = true
+
+    load()
+
+    return () => {
+      isFocusedRef.current = false
+    }
+  }, [load])
+
+  /** Reloads on every focus: the root blocker and the settings entry stay mounted below
+   *  the flow while it advances, so a mount-only read would keep offering a restart
+   *  after the user already has a resumable step. */
+  useFocusEffect(reloadCheckpoint)
+
+  /** A checkpoint belongs to the custodial account that saved it; another profile on the
+   *  same device starts its own flow instead of resuming, and inheriting, this one. */
+  const isOwnedByActiveAccount =
+    !stored?.custodialAccountId || stored.custodialAccountId === ownerId
+  const checkpoint = isOwnedByActiveAccount ? stored?.step ?? null : null
+  const accountId = isOwnedByActiveAccount ? stored?.accountId ?? null : null
+  const expectedReceiveSats = isOwnedByActiveAccount
+    ? stored?.expectedReceiveSats ?? null
+    : null
+  /** Owned like the ids above: another profile's confirmed start says nothing about this
+   *  account's flow. */
+  const isStartConfirmed = isOwnedByActiveAccount && stored?.isStartConfirmed === true
+
+  /** Answers `isSaved: false` when the write fails, so callers can stop the flow instead of
+   *  advancing on a checkpoint that only exists in memory, and carries the kind of failure
+   *  with it so a full disk can be named rather than toasted as "something went wrong".
+   *  Re-sending what this hook already knows heals a failed write: mergeCheckpoint preserves
+   *  what reached storage, this covers what never did. */
+  const saveCheckpoint = useCallback(
+    async (
+      step: MigrationCheckpoint,
+      {
+        provisionedAccountId,
+        expectedReceiveSats: expectedReceiveSatsUpdate,
+        isStartConfirmed: isStartConfirmedUpdate,
+        isServerFlowUnstarted,
+        isReceiveFigureRefreshed,
+      }: SaveCheckpointOptions = {},
+    ): Promise<StorageWriteResult> => {
+      /** Without a resolved owner the checkpoint cannot be keyed, and saving would erase the
+       *  stored owner + account id via mergeCheckpoint; refuse so a null-owner window (an
+       *  offline owner query) never wipes real progress. Callers gate on the false. */
+      if (!ownerId) return { isSaved: false, failure: null }
+      const update = {
+        step,
+        accountId: provisionedAccountId ?? accountId ?? undefined,
+        custodialAccountId: ownerId,
+        expectedReceiveSats:
+          expectedReceiveSatsUpdate ?? expectedReceiveSats ?? undefined,
+        isStartConfirmed: isStartConfirmedUpdate,
+        isServerFlowUnstarted,
+        isReceiveFigureRefreshed,
+      }
+      try {
+        const written = await saveCheckpointToStorage(storageKey, update)
+        /** Applied only once the disk has it, and as the disk has it. An optimistic update
+         *  here would leave the hook reporting a step the store refused, which is how a
+         *  resume ends up looking for an expected receive that was never written; and a
+         *  merge against this hook's own copy would drift from what another instance wrote
+         *  to the same key since this one last read it. */
+        setStored(written)
+        return { isSaved: true, failure: null }
+      } catch (err) {
+        reportError("Checkpoint save", err)
+        return { isSaved: false, failure: classifyStorageFailure(err) }
+      }
+    },
+    [storageKey, ownerId, accountId, expectedReceiveSats],
+  )
+
+  const clearCheckpoint = useCallback(() => {
+    setStored(null)
+    return clearCheckpointFromStorage(storageKey).catch((err) => {
+      reportError("Checkpoint clear", err)
+    })
+  }, [storageKey])
+
+  /** A provisioned account is only stored alongside a checkpoint, so it gates resumability. */
+  const hasResumableCheckpoint = Boolean(accountId)
+
+  /** Reads the same predicate the route resolver does, so the decision to resume and the
+   *  screen resumed to stay one rule. Without a provisioned account there is nothing to
+   *  jump forward to, whatever the stored step says. */
+  const isAtCommitPoint = hasResumableCheckpoint && isCommitPointCheckpoint(checkpoint)
+
+  return {
+    checkpoint,
+    accountId,
+    expectedReceiveSats,
+    isStartConfirmed,
+    /** The owner the record was actually saved under, null on one written before owners
+     *  existed. Read by consumers that spend something irreversible, since the ownership
+     *  flag above claims an owner-less record for whoever is active. */
+    checkpointOwnerId: stored?.custodialAccountId ?? null,
+    loading: loading || ownerLoading,
+    /** A read failure surfaced, not swallowed: without it an unreadable store is
+     *  indistinguishable from a wiped device, and the gate would hand a resumable user
+     *  to support (terminal for that origin) on a transient storage error. */
+    hasError,
+    /** What the failed read was, when the message could say. Carried next to the flag
+     *  because only one of these failures is the user's to fix. */
+    storageFailure,
+    /** Imperative reload for retry screens. Leaves the focus flag alone on purpose: a
+     *  retry resolving after blur still drops its update, same as the focus reload. */
+    refetch: reload,
+    saveCheckpoint,
+    clearCheckpoint,
+    hasResumableCheckpoint,
+    isAtCommitPoint,
+  }
+}

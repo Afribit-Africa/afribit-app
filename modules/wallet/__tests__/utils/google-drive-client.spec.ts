@@ -1,0 +1,388 @@
+import { CloudBackupErrorReason as DriveErrorReason } from "@app/types/cloud-backup"
+import {
+  buildMultipartBody,
+  downloadAppDataFile,
+  DriveError,
+  findAppDataFile,
+  listAppDataFiles,
+  uploadAppDataFile,
+} from "@app/utils/google-drive-client"
+
+describe("google drive client", () => {
+  const originalFetch = global.fetch
+
+  beforeEach(() => {
+    global.fetch = jest.fn() as unknown as typeof fetch
+  })
+
+  afterAll(() => {
+    global.fetch = originalFetch
+  })
+
+  it("builds multipart body with the provided boundary", () => {
+    const body = buildMultipartBody('{"name":"backup.json"}', "content", "test-boundary")
+
+    expect(body).toContain("--test-boundary")
+    expect(body).toContain("Content-Type: application/json; charset=UTF-8")
+    expect(body).toContain("Content-Type: text/plain; charset=UTF-8")
+    expect(body.endsWith("--test-boundary--")).toBe(true)
+  })
+
+  it("finds files in appDataFolder with trashed filter and escaped filename", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      json: async () => ({ files: [{ id: "file-123" }] }),
+    })
+
+    const fileId = await findAppDataFile("blink's backup.json", "token")
+
+    expect(fileId).toBe("file-123")
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining(
+        encodeURIComponent(
+          "name='blink\\'s backup.json' and 'appDataFolder' in parents and trashed = false",
+        ),
+      ),
+      expect.objectContaining({
+        headers: { Authorization: "Bearer token" },
+      }),
+    )
+  })
+
+  it("throws DriveError with reason='auth' on 401", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => "Unauthorized",
+    })
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error).toBeInstanceOf(DriveError)
+    expect(error).toMatchObject({
+      name: "DriveError",
+      reason: DriveErrorReason.Auth,
+      message: expect.stringContaining("Drive query failed (401)"),
+    })
+  })
+
+  it("throws DriveError with reason='auth' on 403", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () => "Forbidden",
+    })
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error).toBeInstanceOf(DriveError)
+    expect(error.reason).toBe(DriveErrorReason.Auth)
+  })
+
+  /** Google reports a withheld Drive scope inside a 403, which needs its own remedy: the
+   *  user has to grant access, not sign in again. */
+  it("throws DriveError with reason='permission-denied' on a scope-insufficient 403", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () =>
+        '{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}',
+    })
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error).toBeInstanceOf(DriveError)
+    expect(error.reason).toBe(DriveErrorReason.PermissionDenied)
+    expect(error.status).toBe(403)
+  })
+
+  /** The legacy Drive error shape names the same withheld-scope cause `insufficientPermissions`,
+   *  so it must resolve to the permission remedy rather than the generic auth error. */
+  it("throws DriveError with reason='permission-denied' on a legacy insufficientPermissions 403", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () =>
+        '{"error":{"code":403,"errors":[{"reason":"insufficientPermissions","message":"Insufficient Permission"}]}}',
+    })
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error).toBeInstanceOf(DriveError)
+    expect(error.reason).toBe(DriveErrorReason.PermissionDenied)
+    expect(error.status).toBe(403)
+  })
+
+  /** The body feeds the scope-insufficient check, so an unreadable one must degrade to a
+   *  plain status classification rather than throwing. */
+  it("classifies by status alone when the error body cannot be read", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () => {
+        throw new Error("stream already consumed")
+      },
+    })
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error).toBeInstanceOf(DriveError)
+    expect(error.reason).toBe(DriveErrorReason.Auth)
+  })
+
+  it("exposes the http status on the error", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => "Unauthorized",
+    })
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error.status).toBe(401)
+  })
+
+  it("throws DriveError with reason='transient' on 429", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 429,
+      text: async () => "Rate limited",
+    })
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error).toBeInstanceOf(DriveError)
+    expect(error.reason).toBe(DriveErrorReason.Transient)
+  })
+
+  it("throws DriveError with reason='transient' on 503", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => "Service unavailable",
+    })
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error).toBeInstanceOf(DriveError)
+    expect(error.reason).toBe(DriveErrorReason.Transient)
+  })
+
+  it("throws DriveError with reason='transient' on the 500 boundary", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => "Internal server error",
+    })
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error).toBeInstanceOf(DriveError)
+    expect(error.reason).toBe(DriveErrorReason.Transient)
+  })
+
+  it("throws DriveError with reason='transient' when fetch itself rejects (network failure)", async () => {
+    ;(global.fetch as jest.Mock).mockRejectedValue(
+      new TypeError("Network request failed"),
+    )
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error).toBeInstanceOf(DriveError)
+    expect(error.reason).toBe(DriveErrorReason.Transient)
+    expect(error.message).toContain("Drive network error")
+  })
+
+  it("describes a non-Error rejection from fetch", async () => {
+    ;(global.fetch as jest.Mock).mockRejectedValue("socket closed")
+
+    const error = await findAppDataFile("backup.json", "token").catch((e) => e)
+    expect(error).toBeInstanceOf(DriveError)
+    expect(error.message).toContain("socket closed")
+  })
+
+  it("uploads with POST when there is no existing file", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+    })
+
+    await uploadAppDataFile({
+      content: "content",
+      fileName: "backup.json",
+      accessToken: "token",
+    })
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("uploadType=multipart"),
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "Authorization": "Bearer token",
+          "Content-Type": expect.stringContaining("multipart/related; boundary=blink_"),
+        }),
+        body: expect.stringContaining('"parents":["appDataFolder"]'),
+      }),
+    )
+  })
+
+  it("uploads with PATCH when updating an existing file", async () => {
+    ;(global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+    })
+
+    await uploadAppDataFile({
+      content: "content",
+      fileName: "backup.json",
+      accessToken: "token",
+      existingId: "file-123",
+    })
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/file-123?uploadType=multipart"),
+      expect.objectContaining({
+        method: "PATCH",
+        body: expect.stringContaining('"name":"backup.json"'),
+      }),
+    )
+  })
+
+  it("downloadAppDataFile returns file content on success", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve('{"mnemonic":"test words"}'),
+    })
+
+    const content = await downloadAppDataFile("file-456", "token-abc")
+
+    expect(content).toBe('{"mnemonic":"test words"}')
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/file-456?alt=media"),
+      expect.objectContaining({
+        headers: { Authorization: "Bearer token-abc" },
+      }),
+    )
+  })
+
+  describe("listAppDataFiles", () => {
+    it("queries appDataFolder with name-contains and trashed filter", async () => {
+      ;(global.fetch as jest.Mock).mockResolvedValue({
+        ok: true,
+        json: async () => ({ files: [] }),
+      })
+
+      await listAppDataFiles("blink-spark-backup-blink-", "token")
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining(
+          encodeURIComponent(
+            "name contains 'blink-spark-backup-blink-' and 'appDataFolder' in parents and trashed = false",
+          ),
+        ),
+        expect.objectContaining({
+          headers: { Authorization: "Bearer token" },
+        }),
+      )
+    })
+
+    it("returns matching entries with id and name", async () => {
+      ;(global.fetch as jest.Mock).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          files: [
+            { id: "file-1", name: "blink-spark-backup-blink-pubkey1.json" },
+            { id: "file-2", name: "blink-spark-backup-blink-pubkey2.json" },
+          ],
+        }),
+      })
+
+      const entries = await listAppDataFiles("blink-spark-backup-blink-", "token")
+
+      expect(entries).toEqual([
+        { id: "file-1", name: "blink-spark-backup-blink-pubkey1.json" },
+        { id: "file-2", name: "blink-spark-backup-blink-pubkey2.json" },
+      ])
+    })
+
+    it("filters out entries that do not start with the prefix (substring matches)", async () => {
+      ;(global.fetch as jest.Mock).mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          files: [
+            { id: "file-1", name: "blink-spark-backup-blink-pubkey1.json" },
+            { id: "file-2", name: "other-blink-spark-backup-blink-noise.json" },
+          ],
+        }),
+      })
+
+      const entries = await listAppDataFiles("blink-spark-backup-blink-", "token")
+
+      expect(entries).toEqual([
+        { id: "file-1", name: "blink-spark-backup-blink-pubkey1.json" },
+      ])
+    })
+
+    it("escapes single quotes in the prefix", async () => {
+      ;(global.fetch as jest.Mock).mockResolvedValue({
+        ok: true,
+        json: async () => ({ files: [] }),
+      })
+
+      await listAppDataFiles("blink's-backup-", "token")
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining(encodeURIComponent("name contains 'blink\\'s-backup-'")),
+        expect.any(Object),
+      )
+    })
+
+    it("throws DriveError with reason='auth' when list returns 401", async () => {
+      ;(global.fetch as jest.Mock).mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: async () => "Unauthorized",
+      })
+
+      await expect(listAppDataFiles("prefix-", "token")).rejects.toMatchObject({
+        reason: DriveErrorReason.Auth,
+        message: expect.stringContaining("Drive list query failed (401)"),
+      })
+    })
+  })
+
+  it("downloadAppDataFile throws DriveError with reason='not-found' on 404", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: () => Promise.resolve("Not found"),
+    })
+
+    await expect(downloadAppDataFile("file-456", "token-abc")).rejects.toMatchObject({
+      reason: DriveErrorReason.NotFound,
+      message: expect.stringContaining("Drive download failed (404)"),
+    })
+  })
+
+  it("downloadAppDataFile throws DriveError with reason='unknown' on 418", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 418,
+      text: () => Promise.resolve("I'm a teapot"),
+    })
+
+    await expect(downloadAppDataFile("file-456", "token-abc")).rejects.toMatchObject({
+      reason: DriveErrorReason.Unknown,
+    })
+  })
+
+  it("aborts a request that stalls and reports it as transient", async () => {
+    jest.useFakeTimers()
+    try {
+      global.fetch = jest.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => reject(new Error("Aborted")))
+          }),
+      ) as unknown as typeof fetch
+
+      const download = downloadAppDataFile("file-456", "token-abc")
+      jest.advanceTimersByTime(60_000)
+
+      await expect(download).rejects.toMatchObject({
+        reason: DriveErrorReason.Transient,
+        message: "Drive network error: Aborted",
+      })
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+})

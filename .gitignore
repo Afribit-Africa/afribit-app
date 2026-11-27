@@ -1,0 +1,21 @@
+node_modules/
+.expo/
+dist/
+web-build/
+apps/shell/android/
+apps/shell/ios/
+*.apk
+*.aab
+*.keystore
+*.jks
+.env
+.env.*
+!.env.example
+npm-debug.log*
+.DS_Store
+
+# Internal plans and agent briefs (never committed)
+.internal/
+
+__pycache__/
+*.pyc

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "chat",
+  "displayName": { "en": "Chat", "sw": "Gumzo" },
+  "tagline": { "en": "Private messages with your community on the Afribit Mesh.", "sw": "Ujumbe wa faragha na jamii yako kwenye Afribit Mesh." },
+  "version": "0.1.0",
+  "owner": "afribit-africa",
+  "license": "internal-owned",
+  "classification": "B",
+  "kind": "native",
+  "readiness": "preview",
+  "category": "communication",
+  "requires": { "network": "mesh", "account": false },
+  "requestedCapabilities": ["app.openService", "wallet.preparePayment", "wallet.payContact", "wallet.createRequest", "profile.read", "notify.local"],
+  "networkDomains": [],
+  "isolation": { "process": "shell", "storageNamespace": "feature.chat" },
+  "minimumHostContract": "1.0"
+}

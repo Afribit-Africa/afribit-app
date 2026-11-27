@@ -1,0 +1,211 @@
+import parsePhoneNumber, {
+  AsYouType,
+  CountryCode as PhoneNumberCountryCode,
+  getCountryCallingCode,
+} from "libphonenumber-js/mobile"
+import React, { useEffect, useMemo, useRef, useState } from "react"
+import { View, StyleProp, ViewStyle } from "react-native"
+import { CountryCode } from "react-native-country-picker-modal"
+import { Input, makeStyles } from "@rn-vui/themed"
+import { radius } from "@app/rne-theme/radius"
+import { testProps } from "@app/utils/testProps"
+import useDeviceLocation from "@app/hooks/use-device-location"
+import { useSupportedCountriesQuery } from "@app/graphql/generated"
+import { IconNode } from "@rn-vui/base"
+import type { InputRef } from "@app/types/themed-input"
+
+import { CountryCodePicker } from "./country-code-picker"
+import PhoneInputSkeleton from "./phone-input-skeleton"
+
+const PLACEHOLDER_PHONE_NUMBER = "123-456-7890"
+
+export type PhoneInputInfo = {
+  countryCode: CountryCode
+  countryCallingCode: string
+  formattedPhoneNumber: string
+  rawPhoneNumber: string
+}
+
+export type PhoneInputProps = {
+  value: string
+  onChangeText: (info: string) => void
+  onChangeInfo?: (info: PhoneInputInfo | null) => void
+  rightIcon?: IconNode
+  isDisabled?: boolean
+  keepCountryCode?: boolean
+  onFocus?: () => void
+  onBlur?: () => void
+  onSubmitEditing?: () => void
+  inputContainerStyle?: StyleProp<ViewStyle>
+  countryPickerButtonStyle?: StyleProp<ViewStyle>
+  bgColor?: string
+}
+
+export const PhoneInput: React.FC<PhoneInputProps> = ({
+  value,
+  onChangeText,
+  onChangeInfo,
+  rightIcon,
+  isDisabled,
+  keepCountryCode,
+  onFocus,
+  onBlur,
+  onSubmitEditing,
+  inputContainerStyle,
+  countryPickerButtonStyle,
+  bgColor,
+}) => {
+  const styles = useStyles({ bgColor })
+
+  const { data } = useSupportedCountriesQuery()
+
+  const [countryCode, setCountryCode] = useState<PhoneNumberCountryCode | undefined>()
+  const phoneInputRef = useRef<InputRef>(null)
+  const { countryCode: detectedCountryCode, loading: loadingLocation } =
+    useDeviceLocation()
+
+  const { allSupportedCountries } = useMemo(() => {
+    const allSupportedCountries = (data?.globals?.supportedCountries.map(
+      (country) => country.id,
+    ) || []) as CountryCode[]
+
+    return {
+      allSupportedCountries,
+    }
+  }, [data?.globals])
+
+  useEffect(() => {
+    if (detectedCountryCode) {
+      setCountryCode(detectedCountryCode)
+    }
+  }, [detectedCountryCode])
+
+  useEffect(() => {
+    if (value && countryCode) {
+      if (keepCountryCode) return
+      const parsedPhoneNumber = parsePhoneNumber(value, countryCode)
+      if (parsedPhoneNumber?.country && parsedPhoneNumber.country !== countryCode) {
+        setCountryCode(parsedPhoneNumber.country)
+      }
+    }
+  }, [value, countryCode, keepCountryCode])
+
+  const handleCountrySelect = (country: { cca2: string }) => {
+    setCountryCode(country.cca2 as PhoneNumberCountryCode)
+    setTimeout(() => {
+      phoneInputRef.current?.focus()
+    }, 100)
+  }
+
+  const handleCountryPickerClose = () => {
+    setTimeout(() => {
+      phoneInputRef.current?.focus()
+    }, 300)
+  }
+
+  const setPhoneNumber = (number: string) => {
+    if (!keepCountryCode) {
+      const parsedPhoneNumber = parsePhoneNumber(number, countryCode)
+      if (parsedPhoneNumber?.country) {
+        setCountryCode(parsedPhoneNumber.country)
+      }
+    }
+    onChangeText(number)
+  }
+
+  const phoneInputInfo = useMemo((): PhoneInputInfo | null => {
+    if (!countryCode) return null
+    const countryCallingCode = getCountryCallingCode(countryCode)
+
+    const info = {
+      countryCode: countryCode as CountryCode,
+      formattedPhoneNumber: new AsYouType(countryCode).input(value),
+      countryCallingCode,
+      rawPhoneNumber: value,
+    }
+    return info
+  }, [countryCode, value])
+
+  useEffect(() => {
+    if (onChangeInfo) onChangeInfo(phoneInputInfo)
+  }, [phoneInputInfo, onChangeInfo])
+
+  if (loadingLocation) {
+    return <PhoneInputSkeleton height={60} />
+  }
+
+  return (
+    <View style={styles.inputContainer}>
+      <CountryCodePicker
+        countryCode={phoneInputInfo?.countryCode as CountryCode}
+        countryCodes={allSupportedCountries as CountryCode[]}
+        onSelect={handleCountrySelect}
+        onClose={handleCountryPickerClose}
+        buttonStyle={[
+          styles.countryPickerButtonStyle,
+          isDisabled && styles.disabledInput,
+          countryPickerButtonStyle,
+        ]}
+      />
+      <Input
+        {...testProps("telephoneNumber")}
+        ref={phoneInputRef}
+        placeholder={PLACEHOLDER_PHONE_NUMBER}
+        containerStyle={styles.inputComponentContainerStyle}
+        inputContainerStyle={[
+          styles.inputContainerStyle,
+          isDisabled && styles.disabledInput,
+          inputContainerStyle,
+        ]}
+        inputStyle={styles.input}
+        renderErrorMessage={false}
+        textContentType="telephoneNumber"
+        keyboardType="phone-pad"
+        value={value}
+        onChangeText={setPhoneNumber}
+        autoFocus={false}
+        rightIcon={rightIcon}
+        onFocus={onFocus}
+        onBlur={onBlur}
+        onSubmitEditing={onSubmitEditing}
+      />
+    </View>
+  )
+}
+
+const useStyles = makeStyles(({ colors }, props: { bgColor?: string }) => ({
+  inputContainer: {
+    flexDirection: "row",
+    alignItems: "stretch",
+    minHeight: 60,
+  },
+  countryPickerButtonStyle: {
+    backgroundColor: props.bgColor || colors.surfaceInteractive,
+    borderRadius: radius.default,
+    paddingHorizontal: 15,
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  inputComponentContainerStyle: {
+    flex: 1,
+    marginLeft: 20,
+    paddingLeft: 0,
+    paddingRight: 0,
+  },
+  inputContainerStyle: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.transparent,
+    paddingHorizontal: 10,
+    backgroundColor: props.bgColor || colors.surfaceInteractive,
+    borderRadius: radius.default,
+  },
+  /** The paste control shares the row with the number, and the field only clips at its own
+   *  edge: without a gap the two read as one string once the OS text size grows the number
+   *  into it. Reserving it costs nothing at the sizes where the number already fits. */
+  input: {
+    paddingRight: 8,
+  },
+  disabledInput: { opacity: 0.6 },
+}))

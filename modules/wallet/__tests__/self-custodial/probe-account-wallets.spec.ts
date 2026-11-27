@@ -1,0 +1,304 @@
+import { Network } from "@breeztech/breez-sdk-spark-react-native"
+
+import {
+  probeSelfCustodialAccountWallets,
+  ProbeAccountWalletsStatus,
+} from "@app/self-custodial/probe-account-wallets"
+import { WalletCurrency } from "@app/graphql/generated"
+import { toBtcMoneyAmount, toUsdMoneyAmount } from "@app/types/amounts"
+import { toWalletId } from "@app/types/wallet"
+
+/** Threaded explicitly since the config functions stopped reading a global; the real
+ *  value comes from `useLnurlServer()` at the calling hook. */
+const TEST_LNURL_DOMAIN = "staging.blink.sv"
+
+const mockReadMnemonic = jest.fn()
+jest.mock("@app/utils/storage/secureStorage", () => ({
+  __esModule: true,
+  default: {
+    readMnemonicWithStatus: (...args: unknown[]) => mockReadMnemonic(...args),
+  },
+}))
+
+const mockInitSdk = jest.fn()
+const mockDisconnectSdk = jest.fn().mockResolvedValue(undefined)
+jest.mock("@app/self-custodial/bridge", () => ({
+  initSdk: (...args: unknown[]) => mockInitSdk(...args),
+  disconnectSdk: (...args: unknown[]) => mockDisconnectSdk(...args),
+}))
+
+const mockStorageDirFor = jest.fn((accountId: string) => `/storage/spark/${accountId}`)
+jest.mock("@app/self-custodial/config", () => ({
+  storageDirFor: (accountId: string) => mockStorageDirFor(accountId),
+}))
+
+const mockGetSnapshot = jest.fn()
+jest.mock("@app/self-custodial/providers/wallet-snapshot", () => ({
+  getSelfCustodialWalletSnapshot: (...args: unknown[]) => mockGetSnapshot(...args),
+}))
+
+const mockRecordError = jest.fn()
+jest.mock("@react-native-firebase/crashlytics", () => () => ({
+  recordError: (...args: unknown[]) => mockRecordError(...args),
+  log: jest.fn(),
+}))
+
+const TEST_ACCOUNT_ID = "account-123"
+const TEST_MNEMONIC = "abandon abandon abandon abandon abandon abandon"
+const FAKE_SDK = { id: "sdk-instance" }
+const TEST_LEEWAY = 4
+
+const sampleWallets = [
+  {
+    id: toWalletId("pubkey-btc"),
+    walletCurrency: WalletCurrency.Btc,
+    balance: toBtcMoneyAmount(522),
+    transactions: [],
+  },
+  {
+    id: toWalletId("pubkey-usd"),
+    walletCurrency: WalletCurrency.Usd,
+    balance: toUsdMoneyAmount(987),
+    transactions: [],
+  },
+]
+
+describe("probeSelfCustodialAccountWallets", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it("returns no-mnemonic without initializing the SDK when no mnemonic is stored", async () => {
+    mockReadMnemonic.mockResolvedValue({ status: "absent" })
+
+    const result = await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    expect(result).toEqual({ status: ProbeAccountWalletsStatus.NoMnemonic })
+    expect(mockInitSdk).not.toHaveBeenCalled()
+    expect(mockDisconnectSdk).not.toHaveBeenCalled()
+  })
+
+  /**
+   * The read that merely failed must never be answered as "no mnemonic": the
+   * delete flow reads NoMnemonic as "nothing to warn about", skips the has-funds
+   * warning, and the erase that follows still reaches the seed, because deleting
+   * does not decrypt.
+   */
+  it("reports a failed read as a probe failure, not as an account without a mnemonic", async () => {
+    mockReadMnemonic.mockResolvedValue({
+      status: "failed",
+      err: new Error("secure-store.blink.local/mnemonic:account-123 locked"),
+    })
+
+    const result = await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    expect(result.status).toBe(ProbeAccountWalletsStatus.ProbeFailed)
+    expect(mockInitSdk).not.toHaveBeenCalled()
+  })
+
+  /**
+   * profile-row hands this error straight to Crashlytics, and a keychain error
+   * can carry the server string, which ends in the account id.
+   */
+  it("keeps the account id out of the error it hands the caller", async () => {
+    mockReadMnemonic.mockResolvedValue({
+      status: "failed",
+      err: new Error(`secure-store.blink.local/mnemonic:${TEST_ACCOUNT_ID} locked`),
+    })
+
+    const result = await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    if (result.status === ProbeAccountWalletsStatus.ProbeFailed) {
+      expect(result.error.message).not.toContain(TEST_ACCOUNT_ID)
+      expect(result.error.message).toBe("Mnemonic read failed")
+    }
+  })
+
+  it("connects with the account's mnemonic and storage dir, returns ok with snapshot wallets", async () => {
+    mockReadMnemonic.mockResolvedValue({ status: "found", value: TEST_MNEMONIC })
+    mockInitSdk.mockResolvedValue(FAKE_SDK)
+    mockGetSnapshot.mockResolvedValue({
+      wallets: sampleWallets,
+      hasMore: false,
+      rawTransactionCount: 0,
+    })
+
+    const result = await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    expect(mockInitSdk).toHaveBeenCalledWith({
+      mnemonic: TEST_MNEMONIC,
+      storageDir: `/storage/spark/${TEST_ACCOUNT_ID}`,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+    expect(mockGetSnapshot).toHaveBeenCalledWith(FAKE_SDK)
+    expect(result).toEqual({
+      status: ProbeAccountWalletsStatus.Ok,
+      wallets: sampleWallets,
+    })
+  })
+
+  it("disconnects the SDK after a successful snapshot read", async () => {
+    mockReadMnemonic.mockResolvedValue({ status: "found", value: TEST_MNEMONIC })
+    mockInitSdk.mockResolvedValue(FAKE_SDK)
+    mockGetSnapshot.mockResolvedValue({
+      wallets: sampleWallets,
+      hasMore: false,
+      rawTransactionCount: 0,
+    })
+
+    await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    expect(mockDisconnectSdk).toHaveBeenCalledWith(FAKE_SDK)
+  })
+
+  it("returns probe-failed (not ok) when the snapshot fetch throws, but still disconnects the SDK", async () => {
+    mockReadMnemonic.mockResolvedValue({ status: "found", value: TEST_MNEMONIC })
+    mockInitSdk.mockResolvedValue(FAKE_SDK)
+    mockGetSnapshot.mockRejectedValue(new Error("getInfo failed"))
+
+    const result = await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    expect(result.status).toBe(ProbeAccountWalletsStatus.ProbeFailed)
+    if (result.status === ProbeAccountWalletsStatus.ProbeFailed) {
+      expect(result.error.message).toBe("getInfo failed")
+    }
+    expect(mockDisconnectSdk).toHaveBeenCalledWith(FAKE_SDK)
+  })
+
+  it("returns probe-failed (not ok) when the connect step fails, and never attempts to disconnect", async () => {
+    mockReadMnemonic.mockResolvedValue({ status: "found", value: TEST_MNEMONIC })
+    mockInitSdk.mockRejectedValue(new Error("connect failed"))
+
+    const result = await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    expect(result.status).toBe(ProbeAccountWalletsStatus.ProbeFailed)
+    if (result.status === ProbeAccountWalletsStatus.ProbeFailed) {
+      expect(result.error.message).toBe("connect failed")
+    }
+    expect(mockDisconnectSdk).not.toHaveBeenCalled()
+  })
+
+  it("wraps a non-Error rejection from the snapshot fetch into an Error", async () => {
+    mockReadMnemonic.mockResolvedValue({ status: "found", value: TEST_MNEMONIC })
+    mockInitSdk.mockResolvedValue(FAKE_SDK)
+    mockGetSnapshot.mockRejectedValue("opaque string failure")
+
+    const result = await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    expect(result.status).toBe(ProbeAccountWalletsStatus.ProbeFailed)
+    if (result.status === ProbeAccountWalletsStatus.ProbeFailed) {
+      expect(result.error).toBeInstanceOf(Error)
+      expect(result.error.message).toContain("opaque string failure")
+    }
+  })
+
+  it("swallows disconnect errors so the snapshot read still resolves to ok", async () => {
+    mockReadMnemonic.mockResolvedValue({ status: "found", value: TEST_MNEMONIC })
+    mockInitSdk.mockResolvedValue(FAKE_SDK)
+    mockGetSnapshot.mockResolvedValue({
+      wallets: sampleWallets,
+      hasMore: false,
+      rawTransactionCount: 0,
+    })
+    mockDisconnectSdk.mockRejectedValueOnce(new Error("disconnect failed"))
+
+    const result = await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    expect(result).toEqual({
+      status: ProbeAccountWalletsStatus.Ok,
+      wallets: sampleWallets,
+    })
+  })
+
+  it("records the disconnect failure to crashlytics so leaking SDK instances are observable", async () => {
+    mockReadMnemonic.mockResolvedValue({ status: "found", value: TEST_MNEMONIC })
+    mockInitSdk.mockResolvedValue(FAKE_SDK)
+    mockGetSnapshot.mockResolvedValue({
+      wallets: sampleWallets,
+      hasMore: false,
+      rawTransactionCount: 0,
+    })
+    const disconnectError = new Error("SQLite handle locked")
+    mockDisconnectSdk.mockRejectedValueOnce(disconnectError)
+
+    await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    expect(mockRecordError).toHaveBeenCalledWith(disconnectError)
+  })
+
+  it("wraps a non-Error disconnect rejection into an Error before recording it", async () => {
+    mockReadMnemonic.mockResolvedValue({ status: "found", value: TEST_MNEMONIC })
+    mockInitSdk.mockResolvedValue(FAKE_SDK)
+    mockGetSnapshot.mockResolvedValue({
+      wallets: sampleWallets,
+      hasMore: false,
+      rawTransactionCount: 0,
+    })
+    mockDisconnectSdk.mockRejectedValueOnce("native handle invalid")
+
+    await probeSelfCustodialAccountWallets({
+      accountId: TEST_ACCOUNT_ID,
+      network: Network.Regtest,
+      leewaySatPerVbyte: TEST_LEEWAY,
+      lnurlDomain: TEST_LNURL_DOMAIN,
+    })
+
+    expect(mockRecordError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining("Probe SDK disconnect failed"),
+      }),
+    )
+  })
+})

@@ -1,0 +1,9 @@
+{
+  "name": "@afribit/feature-wallet",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Afribit Wallet feature app (Blink fork, self-custodial Breez Spark path). Placeholder until the fork lands.",
+  "main": "src/index.tsx",
+  "dependencies": { "@afribit/feature-sdk": "0.1.0", "@afribit/design": "0.1.0" },
+  "peerDependencies": { "react": "*", "react-native": "*" }
+}

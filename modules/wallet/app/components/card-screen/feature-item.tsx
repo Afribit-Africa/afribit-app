@@ -1,0 +1,63 @@
+import React from "react"
+import { View } from "react-native"
+import { makeStyles, Text, useTheme } from "@rn-vui/themed"
+
+import {
+  circleDiameterThatContainsSquare,
+  GaloyIcon,
+  IconNamesType,
+} from "@app/components/atomic/galoy-icon"
+
+export interface Feature {
+  icon: IconNamesType
+  title: string
+}
+
+interface FeatureItemProps {
+  feature: Feature
+}
+
+export const FeatureItem: React.FC<FeatureItemProps> = ({ feature }) => {
+  const {
+    theme: { colors },
+  } = useTheme()
+  const styles = useStyles()
+
+  return (
+    <View style={styles.featureContainer}>
+      <GaloyIcon
+        name={feature.icon}
+        // eslint-disable-next-line no-restricted-properties -- black icon on the accent fill in both modes
+        color={colors.staticBlack}
+        backgroundColor={colors.accent}
+        style={styles.iconStyle}
+        size={19}
+      />
+      <Text type="p2" style={styles.title}>
+        {feature.title}
+      </Text>
+    </View>
+  )
+}
+
+const useStyles = makeStyles(() => {
+  const containerSize = circleDiameterThatContainsSquare(22)
+
+  return {
+    featureContainer: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 15,
+    },
+    iconStyle: {
+      borderRadius: containerSize / 2,
+      width: containerSize,
+      height: containerSize,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    title: {
+      flex: 1,
+    },
+  }
+})

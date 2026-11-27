@@ -1,0 +1,82 @@
+import { WalletCurrency } from "@app/graphql/generated"
+import {
+  DisplayCurrency,
+  toUsdMoneyAmount,
+  type DisplayCurrency as DisplayCurrencyType,
+  type MoneyAmount,
+  type WalletOrDisplayCurrency,
+} from "@app/types/amounts"
+
+type FormatUsdInDisplayDeps = {
+  formatMoneyAmount: (args: {
+    moneyAmount: MoneyAmount<WalletOrDisplayCurrency>
+  }) => string
+  convertMoneyAmount?: (
+    moneyAmount: MoneyAmount<WalletOrDisplayCurrency>,
+    target: WalletCurrency | DisplayCurrencyType,
+  ) => MoneyAmount<WalletOrDisplayCurrency>
+}
+
+/**
+ * Formats a USD-cents amount in the user's display currency, or as the raw USD amount
+ * when it cannot be converted, so the UI never blocks on price loading. That covers a
+ * converter that has not loaded and one that has no dollar rate, which is what the
+ * sats-only converter answers with: a `NaN` formats as an empty string, and these are
+ * confirmation surfaces where a blank amount reads as nothing being at stake.
+ */
+export const formatUsdInDisplay = (
+  usdCents: number,
+  { formatMoneyAmount, convertMoneyAmount }: FormatUsdInDisplayDeps,
+): string => {
+  const usdAmount = toUsdMoneyAmount(usdCents)
+  const displayAmount = convertMoneyAmount?.(usdAmount, DisplayCurrency)
+  const isDisplayAmountKnown =
+    displayAmount !== undefined && Number.isFinite(displayAmount.amount)
+  return formatMoneyAmount({
+    moneyAmount: isDisplayAmountKnown ? displayAmount : usdAmount,
+  })
+}
+
+export const toSatsAmount = (
+  amount: MoneyAmount<WalletOrDisplayCurrency>,
+  convert: (
+    amount: MoneyAmount<WalletOrDisplayCurrency>,
+    currency: WalletCurrency,
+  ) => MoneyAmount<WalletCurrency>,
+): number => convert(amount, WalletCurrency.Btc).amount
+
+export const satsToMsats = (sats: number): number => sats * 1000
+
+export const msatsToSats = (msats: number): number => Math.round(msats / 1000)
+
+export const tokenBaseUnitsToCentsExact = (
+  rawAmount: number,
+  tokenDecimals: number,
+  displayDecimals = 2,
+): number => {
+  const excessDecimals = Math.max(tokenDecimals - displayDecimals, 0)
+  return rawAmount / 10 ** excessDecimals
+}
+
+export const tokenBaseUnitsToCents = (
+  rawAmount: number,
+  tokenDecimals: number,
+  displayDecimals = 2,
+): number =>
+  Math.round(tokenBaseUnitsToCentsExact(rawAmount, tokenDecimals, displayDecimals))
+
+export const tokenBaseUnitsToCentsCeil = (
+  rawAmount: number,
+  tokenDecimals: number,
+  displayDecimals = 2,
+): number =>
+  Math.ceil(tokenBaseUnitsToCentsExact(rawAmount, tokenDecimals, displayDecimals))
+
+export const centsToTokenBaseUnits = (
+  cents: number,
+  tokenDecimals: number,
+  displayDecimals = 2,
+): number => {
+  const excessDecimals = Math.max(tokenDecimals - displayDecimals, 0)
+  return Math.round(cents * 10 ** excessDecimals)
+}

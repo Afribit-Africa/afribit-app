@@ -1,0 +1,248 @@
+import React, { ReactNode } from "react"
+import { View, TouchableOpacity, StyleSheet, DimensionValue } from "react-native"
+import { ScrollView } from "react-native-gesture-handler"
+import Modal from "react-native-modal"
+
+import { makeStyles, Text, TextProps, useTheme } from "@rn-vui/themed"
+
+import { radius } from "@app/rne-theme/radius"
+import { testProps } from "@app/utils/testProps"
+
+import { GaloyIcon } from "../atomic/galoy-icon"
+import { GaloyPrimaryButton } from "../atomic/galoy-primary-button"
+import { GaloySecondaryButton } from "../atomic/galoy-secondary-button"
+import { fonts } from "@app/rne-theme/fonts"
+
+export type CustomModalProps = {
+  isVisible: boolean
+  toggleModal: () => void
+  image?: ReactNode
+  headerTitle?: string
+  headerTitleSize?: TextProps["type"]
+  title?: string
+  body: ReactNode
+  primaryButtonTitle: string
+  primaryButtonTextAbove?: string
+  nonScrollingContent?: ReactNode
+  primaryButtonOnPress: () => void
+  primaryButtonLoading?: boolean
+  primaryButtonDisabled?: boolean
+  secondaryButtonTitle?: string
+  secondaryButtonOnPress?: () => void
+  secondaryButtonLoading?: boolean
+  showCloseIconButton?: boolean
+  closeIconButtonAccessibilityLabel?: string
+  /** Also disables the close icon, so nothing can close the modal while this is false. */
+  dismissable?: boolean
+  /** Once the modal is off the screen, for what must not run while it closes. */
+  onModalHide?: () => void
+  minHeight?: DimensionValue
+  titleMaxWidth?: DimensionValue
+  titleTextAlignment?: "auto" | "center" | "left" | "right" | "justify"
+  backgroundModalColor?: string
+  titleFontSize?: number
+}
+
+const CustomModal: React.FC<CustomModalProps> = ({
+  isVisible,
+  toggleModal,
+  image,
+  headerTitle,
+  headerTitleSize,
+  title,
+  body,
+  minHeight,
+  titleMaxWidth,
+  titleTextAlignment,
+  primaryButtonTitle,
+  nonScrollingContent,
+  primaryButtonOnPress,
+  primaryButtonTextAbove,
+  primaryButtonLoading,
+  primaryButtonDisabled,
+  secondaryButtonTitle,
+  secondaryButtonOnPress,
+  secondaryButtonLoading,
+  showCloseIconButton = true,
+  closeIconButtonAccessibilityLabel,
+  dismissable = true,
+  onModalHide,
+  backgroundModalColor,
+  titleFontSize,
+}) => {
+  const styles = useStyles({
+    hasPrimaryButtonTextAbove: Boolean(primaryButtonTextAbove),
+    minHeight,
+    titleMaxWidth,
+    titleTextAlignment,
+    showCloseIconButton,
+    backgroundModalColor,
+    titleFontSize,
+    /* eslint @typescript-eslint/ban-ts-comment: "off" */
+    // @ts-ignore-next-line no-implicit-any error
+  }) as StyleSheet.NamedStyles
+  const {
+    theme: { mode, colors },
+  } = useTheme()
+  return (
+    <Modal
+      isVisible={isVisible}
+      backdropOpacity={0.8}
+      backdropColor={colors.backgroundDefault}
+      backdropTransitionOutTiming={0}
+      avoidKeyboard={true}
+      onBackdropPress={dismissable ? toggleModal : undefined}
+      onBackButtonPress={dismissable ? toggleModal : undefined}
+      onModalHide={onModalHide}
+    >
+      <View style={styles.container}>
+        <View style={styles.headerContainer}>
+          {headerTitle ? (
+            <Text
+              numberOfLines={1}
+              ellipsizeMode="tail"
+              style={styles.headerTitle}
+              type={headerTitleSize || "h1"}
+            >
+              {headerTitle}
+            </Text>
+          ) : (
+            <View></View>
+          )}
+
+          {showCloseIconButton && (
+            <TouchableOpacity
+              onPress={toggleModal}
+              {...testProps("modal-close")}
+              disabled={!dismissable}
+              style={!dismissable && styles.closeIconButtonDisabled}
+              accessibilityRole="button"
+              accessibilityLabel={closeIconButtonAccessibilityLabel}
+              accessibilityState={{ disabled: !dismissable }}
+            >
+              <GaloyIcon name="close" size={30} color={colors.textPrimary} />
+            </TouchableOpacity>
+          )}
+        </View>
+        <ScrollView
+          style={styles.modalCard}
+          persistentScrollbar={true}
+          indicatorStyle={mode === "dark" ? "white" : "black"}
+          bounces={false}
+          contentContainerStyle={styles.scrollViewContainer}
+        >
+          {image && <View style={styles.imageContainer}>{image}</View>}
+          {title && (
+            <View style={styles.modalTitleContainer}>
+              <Text style={styles.modalTitleText}>{title}</Text>
+            </View>
+          )}
+          <View style={styles.modalBodyContainer}>{body}</View>
+        </ScrollView>
+        {nonScrollingContent}
+        <View style={styles.modalActionsContainer}>
+          <View>
+            {primaryButtonTextAbove && (
+              <Text style={styles.primaryButtonTextAbove} type="p3">
+                {primaryButtonTextAbove}
+              </Text>
+            )}
+            <GaloyPrimaryButton
+              title={primaryButtonTitle}
+              onPress={primaryButtonOnPress}
+              loading={primaryButtonLoading}
+              disabled={primaryButtonDisabled}
+            />
+          </View>
+          {secondaryButtonTitle && secondaryButtonOnPress && (
+            <GaloySecondaryButton
+              title={secondaryButtonTitle}
+              loading={secondaryButtonLoading}
+              onPress={secondaryButtonOnPress}
+            />
+          )}
+        </View>
+      </View>
+    </Modal>
+  )
+}
+
+export default CustomModal
+
+type UseStylesProps = {
+  hasPrimaryButtonTextAbove: boolean
+  showCloseIconButton: boolean
+  minHeight?: DimensionValue
+  titleTextAlignment?: "auto" | "center" | "left" | "right" | "justify"
+  titleMaxWidth?: DimensionValue
+  backgroundModalColor?: string
+  titleFontSize?: number
+}
+
+const useStyles = makeStyles(({ colors }, props: UseStylesProps) => ({
+  container: {
+    backgroundColor: props.backgroundModalColor ?? colors.surfaceInteractive,
+    maxHeight: "95%",
+    minHeight: props.minHeight || "auto",
+    borderRadius: radius.popup,
+    padding: 20,
+  },
+  modalCard: {
+    width: "100%",
+  },
+  imageContainer: {
+    justifyContent: "center",
+    alignItems: "center",
+    paddingBottom: 20,
+    paddingTop: props.showCloseIconButton ? 0 : 20,
+  },
+  modalTitleContainer: {
+    justifyContent: "center",
+    alignItems: "center",
+    paddingBottom: 10,
+  },
+  modalTitleText: {
+    fontSize: props.titleFontSize ?? 24,
+    fontFamily: fonts.bold,
+    lineHeight: 32,
+    maxWidth: props.titleMaxWidth || "80%",
+    textAlign: props.titleTextAlignment || "center",
+    color: colors.textOnBackground,
+  },
+  modalBodyContainer: {
+    flex: 1,
+    flexGrow: 1,
+  },
+  scrollViewContainer: { flexGrow: 1 },
+  modalBodyText: {
+    fontSize: 20,
+    fontFamily: fonts.regular,
+    lineHeight: 24,
+    textAlign: "center",
+    maxWidth: "80%",
+  },
+  primaryButtonTextAbove: {
+    textAlign: "center",
+    paddingVertical: 8,
+  },
+  modalActionsContainer: {
+    width: "100%",
+    height: "auto",
+    flexDirection: "column",
+    rowGap: 12,
+    marginTop: props.hasPrimaryButtonTextAbove ? 0 : 20,
+  },
+  headerContainer: {
+    display: "flex",
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  closeIconButtonDisabled: {
+    opacity: 0.35,
+  },
+  headerTitle: {
+    flexShrink: 1,
+    flexGrow: 1,
+    marginRight: 10,
+  },
+}))

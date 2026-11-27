@@ -1,0 +1,8 @@
+{
+  "name": "@react-native-firebase/app-check",
+  "version": "0.0.0-afribit.1",
+  "description": "Afribit no-op stand-in: Firebase is not shipped (WALLET_PLAN W-D4)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

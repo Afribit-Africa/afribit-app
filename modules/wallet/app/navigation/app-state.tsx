@@ -1,0 +1,143 @@
+import React, { useCallback, useEffect } from "react"
+import { AppState, AppStateStatus } from "react-native"
+
+import { useNavigation } from "@react-navigation/native"
+import { NativeStackNavigationProp } from "@react-navigation/native-stack"
+
+import { useApolloClient } from "@apollo/client"
+import { useRemoteConfig } from "@app/config/feature-flags-context"
+import {
+  CustodialRestrictionsDocument,
+  HomeAuthedDocument,
+  RegionCheckDocument,
+} from "@app/graphql/generated"
+import { useIsAuthed } from "@app/graphql/is-authed-context"
+import { useSelfCustodialAccountMode } from "@app/self-custodial/hooks/use-self-custodial-account-mode"
+import { useAuthenticationContext } from "@app/navigation/navigation-container-wrapper"
+import { RootStackParamList } from "@app/navigation/stack-param-lists"
+import { logEnterBackground, logEnterForeground } from "@app/utils/analytics"
+import { resetIpCountryLookup } from "@app/utils/ip-country-lookup"
+import KeyStoreWrapper from "@app/utils/storage/secureStorage"
+
+const MILLISECONDS_PER_SECOND = 1000
+
+export const AppStateWrapper: React.FC = () => {
+  const isAuthed = useIsAuthed()
+  const appState = React.useRef(AppState.currentState)
+  const client = useApolloClient()
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>()
+  const { isAppLocked, setAppLocked } = useAuthenticationContext()
+  const { appLockGracePeriodSeconds } = useRemoteConfig()
+  const { isAnonMode } = useSelfCustodialAccountMode()
+
+  /** When the app left the foreground, or null while it has not. A ref rather than state
+   *  because nothing renders from it, and losing it to a killed process is harmless: that
+   *  path already locks through the cold start. */
+  const backgroundedAtRef = React.useRef<number | null>(null)
+
+  /** Read through refs so that flipping the lock, or a remote-config refresh, never tears
+   *  down and re-subscribes the AppState listener underneath a transition in flight. */
+  const isAppLockedRef = React.useRef(isAppLocked)
+  const gracePeriodSecondsRef = React.useRef(appLockGracePeriodSeconds)
+
+  useEffect(() => {
+    isAppLockedRef.current = isAppLocked
+    gracePeriodSecondsRef.current = appLockGracePeriodSeconds
+  }, [isAppLocked, appLockGracePeriodSeconds])
+
+  /** The lock the user configured only ever guarded the cold start, leaving a backgrounded
+   *  session open indefinitely. Re-raise it on return, past a grace period so the common
+   *  hop to another app and straight back does not demand the PIN again. */
+  const relockIfGracePeriodExpired = useCallback(async () => {
+    const backgroundedAt = backgroundedAtRef.current
+    backgroundedAtRef.current = null
+    if (backgroundedAt === null) return
+
+    /** A cold start left at the unlock screen is already locked; raising it again would
+     *  stack a second unlock screen over the first, and demand the PIN twice. */
+    if (isAppLockedRef.current) return
+
+    /** React Native exposes no monotonic clock, so the trip is measured against the wall
+     *  clock, which the user can move. Winding it forward only locks sooner; winding it
+     *  back is the bypass, so a clock that went backwards is treated as a trip that cannot
+     *  be trusted, and locks rather than being let through. */
+    const secondsInBackground = (Date.now() - backgroundedAt) / MILLISECONDS_PER_SECOND
+    const isWithinGracePeriod =
+      secondsInBackground >= 0 && secondsInBackground < gracePeriodSecondsRef.current
+    if (isWithinGracePeriod) return
+
+    /** Fails closed: a store that cannot answer whether a lock is set must not
+     *  answer "no". Collapsing that to false is what would leave the app open
+     *  after a resume for a user who does have a lock, and the migrated slots
+     *  can report a failed read during the window before the first unlock. */
+    const [pin, biometrics] = await Promise.all([
+      KeyStoreWrapper.readIsPinEnabled(),
+      KeyStoreWrapper.readIsBiometricsEnabled(),
+    ])
+    const isLockDisabled = pin.status === "no" && biometrics.status === "no"
+    if (isLockDisabled) return
+
+    /** Both halves are needed: the flag defers incoming deep links until the unlock, and
+     *  the navigation is what actually puts the lock in front of the user. */
+    setAppLocked()
+    navigation.navigate("authenticationCheck", { isResume: true })
+  }, [navigation, setAppLocked])
+
+  const handleAppStateChange = useCallback(
+    async (nextAppState: AppStateStatus) => {
+      /** Recorded before the await below, so that a transition arriving while the relock is
+       *  still running reads the state this one already moved to, rather than a stale one. */
+      const previousAppState = appState.current
+      appState.current = nextAppState
+
+      /** iOS reaches the background through "inactive", which is where `RCTAppState` maps
+       *  `willResignActive`, while Android leaves straight from "active". Both are spelled
+       *  out rather than matched loosely, since /active/ also matches "inactive" and the
+       *  relock would quietly depend on that substring accident. */
+      const isEnteringForeground =
+        previousAppState === "background" && nextAppState === "active"
+      const isLeavingForeground =
+        (previousAppState === "active" || previousAppState === "inactive") &&
+        nextAppState === "background"
+
+      if (isEnteringForeground) {
+        /** Sanctions ride the live connection and are evaluated at every session start,
+         *  so the verdict is re-asked for on return rather than kept from wherever the
+         *  session was backgrounded. It carries no account, so it runs unauthed too.
+         *
+         *  Anon is excluded here rather than left to the query's own `skip`: Apollo parks
+         *  a skipped query in `standby` and would not refetch it, but the promise that an
+         *  Anon account is never located must not rest on that. */
+        isAnonMode || client.refetchQueries({ include: [RegionCheckDocument] })
+
+        /** The self-custodial half still resolves its own country, and its shared lookup
+         *  outlives a session unless dropped here: without this the region a user
+         *  launched on would govern until they killed the app, which is the latch this
+         *  work exists to remove. */
+        resetIpCountryLookup()
+        isAuthed &&
+          client.refetchQueries({
+            include: [HomeAuthedDocument, CustodialRestrictionsDocument],
+          })
+
+        console.info("App has come to the foreground!")
+        logEnterForeground()
+
+        await relockIfGracePeriodExpired()
+      }
+
+      if (isLeavingForeground) {
+        backgroundedAtRef.current = Date.now()
+        logEnterBackground()
+      }
+    },
+    [client, isAuthed, isAnonMode, relockIfGracePeriodExpired],
+  )
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", handleAppStateChange)
+    return () => subscription.remove()
+  }, [handleAppStateChange])
+
+  return <></>
+}

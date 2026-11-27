@@ -1,0 +1,1764 @@
+import React from "react"
+import { it } from "@jest/globals"
+import { Share } from "react-native"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react-native"
+import Clipboard from "@react-native-clipboard/clipboard"
+import nfcManager from "react-native-nfc-manager"
+
+import { loadLocale } from "@app/i18n/i18n-util.sync"
+import { i18nObject } from "@app/i18n/i18n-util"
+import { WalletCurrency } from "@app/graphql/generated"
+import ReceiveScreen from "@app/screens/receive-bitcoin-screen/receive-screen"
+import { ActionButton } from "@app/components/action-button"
+
+import { toastShow } from "@app/utils/toast"
+
+import { ContextForScreen } from "./helper"
+import { flushEffects } from "../helpers/flush-effects"
+
+const makeQueryResult = (defaultWalletId = "btc-wallet-id") => ({
+  loading: false,
+  data: {
+    globals: {
+      __typename: "Globals" as const,
+      network: "signet" as const,
+      feesInformation: {
+        deposit: {
+          minBankFee: "3000",
+          minBankFeeThreshold: "1000000",
+          tiers: [
+            { maxAmount: "1000000", amount: "3000" },
+            { maxAmount: null, amount: "5000" },
+          ],
+        },
+      },
+    },
+    me: {
+      id: "user-id",
+      username: "test1",
+      defaultAccount: {
+        id: "account-id",
+        defaultWalletId,
+        wallets: [
+          {
+            id: "btc-wallet-id",
+            balance: 88413,
+            walletCurrency: WalletCurrency.Btc,
+            __typename: "BTCWallet" as const,
+          },
+          {
+            id: "usd-wallet-id",
+            balance: 158,
+            walletCurrency: WalletCurrency.Usd,
+            __typename: "UsdWallet" as const,
+          },
+        ],
+        __typename: "ConsumerAccount" as const,
+      },
+      __typename: "User" as const,
+    },
+  },
+})
+
+const paymentRequestQueryMock = jest.fn(() => makeQueryResult())
+
+const lnNoAmountInvoiceCreateMock = jest.fn(() =>
+  Promise.resolve({
+    data: {
+      lnNoAmountInvoiceCreate: {
+        errors: [],
+        invoice: {
+          paymentRequest:
+            "lntbs1pjt95g2pp5c2nwtj3zpl08suelj8u26tuhnkhkqzd9pcsc7mu9lgpkh3th9k5sdqqcqzpuxqzfvsp5test",
+          paymentHash: "c2a6e5ca220fde78733f91f8ad2f979daf6009a50e218f6f85fa036bc5772da9",
+          __typename: "LnNoAmountInvoice" as const,
+        },
+        __typename: "LnNoAmountInvoicePayload" as const,
+      },
+    },
+  }),
+)
+
+const onChainAddressCurrentMock = jest.fn(() =>
+  Promise.resolve({
+    data: {
+      onChainAddressCurrent: {
+        errors: [],
+        address: "tb1qstk6xund50xqcrnz7vsly2rke6xpw05pc7lmz5",
+      },
+    },
+  }),
+)
+
+const onChainAddressCreateMock = jest.fn(() =>
+  Promise.resolve({
+    data: {
+      onChainAddressCreate: {
+        errors: [] as { message: string; code?: string }[],
+        address: "tb1qfreshaddressxxxxxxxxxxxxxxxxxxxxxxx9fresh" as string | null,
+      },
+    },
+  }),
+)
+
+const lnInvoiceCreateMock = jest.fn(() =>
+  Promise.resolve({
+    data: {
+      lnInvoiceCreate: {
+        errors: [],
+        invoice: {
+          paymentRequest:
+            "lntbs10u1pjt95g2pp5c2nwtj3zpl08suelj8u26tuhnkhkqzd9pcsc7mu9lgpkh3th9k5sdqqcqzpuxqzfvsp5test",
+          paymentHash: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+          __typename: "LnInvoice" as const,
+        },
+        __typename: "LnInvoicePayload" as const,
+      },
+    },
+  }),
+)
+
+const lnUsdInvoiceCreateMock = jest.fn(() =>
+  Promise.resolve({
+    data: {
+      lnUsdInvoiceCreate: {
+        errors: [],
+        invoice: {
+          paymentRequest:
+            "lntbs10u1pjt95g2pp5usd0nwtj3zpl08suelj8u26tuhnkhkqzd9pcsc7mu9lgpkh3th9k5sdqqcqzpuxqzfvsp5test",
+          paymentHash: "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3",
+          __typename: "LnInvoice" as const,
+        },
+        __typename: "LnUsdInvoicePayload" as const,
+      },
+    },
+  }),
+)
+
+jest.mock("@app/graphql/generated", () => {
+  const actual = jest.requireActual("@app/graphql/generated")
+  return {
+    ...actual,
+    usePaymentRequestQuery: () => paymentRequestQueryMock(),
+    useRealtimePriceQuery: () => ({ data: null }),
+    useLnNoAmountInvoiceCreateMutation: () => [lnNoAmountInvoiceCreateMock],
+    useLnInvoiceCreateMutation: () => [lnInvoiceCreateMock],
+    useLnUsdInvoiceCreateMutation: () => [lnUsdInvoiceCreateMock],
+    useOnChainAddressCurrentMutation: () => [onChainAddressCurrentMock],
+    useOnChainAddressCreateMutation: () => [onChainAddressCreateMock],
+    useMyLnUpdatesSubscription: () => ({ data: null }),
+  }
+})
+
+const priceConversionMock = jest.fn(() => ({
+  convertMoneyAmount: (
+    moneyAmount: { amount: number; currency: string },
+    toCurrency: string,
+  ) => ({
+    amount: moneyAmount.amount,
+    currency: toCurrency,
+    currencyCode: toCurrency,
+  }),
+}))
+
+jest.mock("@app/hooks", () => {
+  const actual = jest.requireActual("@app/hooks")
+  return {
+    ...actual,
+    usePriceConversion: () => priceConversionMock(),
+    useAppConfig: () => ({
+      appConfig: {
+        galoyInstance: {
+          lnAddressHostname: "blink.sv",
+          name: "Blink",
+          posUrl: "https://pay.blink.sv",
+        },
+      },
+    }),
+  }
+})
+
+jest.mock("@app/hooks/use-dollar-balance-restricted", () => ({
+  useDollarBalanceGate: () => ({ isGated: false, isRegionPending: false }),
+  useDollarBalanceGated: () => false,
+}))
+
+jest.mock("@app/hooks/use-device-location", () => ({
+  __esModule: true,
+  default: () => ({ countryCode: "SV", loading: false }),
+}))
+
+jest.mock("@app/hooks/use-display-currency", () => {
+  const info = {
+    BTC: {
+      symbol: "",
+      minorUnitToMajorUnitOffset: 0,
+      showFractionDigits: false,
+      currencyCode: "SAT",
+    },
+    USD: {
+      symbol: "$",
+      minorUnitToMajorUnitOffset: 2,
+      showFractionDigits: true,
+      currencyCode: "USD",
+    },
+    DisplayCurrency: {
+      symbol: "$",
+      minorUnitToMajorUnitOffset: 2,
+      showFractionDigits: true,
+      currencyCode: "USD",
+    },
+  }
+
+  return {
+    useDisplayCurrency: () => ({
+      currencyInfo: info,
+      zeroDisplayAmount: { amount: 0, currency: "DisplayCurrency", currencyCode: "USD" },
+      formatMoneyAmount: ({ moneyAmount }: { moneyAmount: { amount: number } }) =>
+        `$${moneyAmount.amount}`,
+      getSecondaryAmountIfCurrencyIsDifferent: () => null,
+    }),
+  }
+})
+
+jest.mock("@react-native-clipboard/clipboard", () => ({
+  setString: jest.fn(),
+  getString: jest.fn(() => Promise.resolve("")),
+}))
+
+jest.mock("@app/components/upgrade-account-modal", () => ({
+  TrialAccountLimitsModal: () => null,
+}))
+
+jest.mock("react-native-nfc-manager", () => ({
+  __esModule: true,
+  default: {
+    isSupported: jest.fn().mockResolvedValue(false),
+    start: jest.fn(),
+    stop: jest.fn(),
+    requestTechnology: jest.fn().mockResolvedValue(undefined),
+    // No tag found: ModalNfc init alerts "not compatible" and dismisses cleanly
+    getTag: jest.fn().mockResolvedValue(null),
+    cancelTechnologyRequest: jest.fn().mockResolvedValue(undefined),
+  },
+  NfcTech: { Ndef: "Ndef" },
+  Ndef: { text: { decodePayload: jest.fn(() => "") } },
+}))
+
+// The invoice fixtures in this spec are intentionally fake (invalid bech32
+// checksum), which makes the real decodeInvoiceString throw and prToDateString
+// console.error on every quote generation, flooding CI logs. Return no expiry
+// instead — the same value prToDateString produced via its catch path — so
+// screen behavior is unchanged (no countdown mounts) and the logs stay clean.
+// useCountdown itself is covered by __tests__/hooks/use-countdown.spec.ts.
+jest.mock("@blinkbitcoin/blink-client", () => ({
+  ...jest.requireActual("@blinkbitcoin/blink-client"),
+  decodeInvoiceString: jest.fn(() => ({ timeExpireDateString: undefined })),
+}))
+
+jest.mock("react-native-haptic-feedback", () => ({
+  trigger: jest.fn(),
+}))
+
+jest.mock("@app/utils/toast", () => ({
+  toastShow: jest.fn(),
+}))
+
+jest.mock("react-native-reanimated", () => {
+  const { View: RNView, Animated: RNAnimated } = jest.requireActual("react-native")
+  return {
+    // RNGH 3 reaches into more of Reanimated than this screen does; the
+    // official mock covers that, and the overrides below stay as they were.
+    ...jest.requireActual("react-native-reanimated/mock"),
+    __esModule: true,
+    default: {
+      View: RNView,
+      createAnimatedComponent: (component: React.ComponentType) =>
+        RNAnimated.createAnimatedComponent(component),
+    },
+    useSharedValue: (initial: number) => ({ value: initial }),
+    useAnimatedStyle: () => ({}),
+    withTiming: (value: number) => value,
+    cancelAnimation: jest.fn(),
+    interpolate: jest.fn(() => 0),
+    Easing: { bezier: () => jest.fn() },
+    runOnJS: (fn: () => void) => fn,
+  }
+})
+
+jest.mock("react-native-reanimated-carousel", () => {
+  const ReactMock = jest.requireActual("react")
+  const { View: RNView, Pressable: RNPressable } = jest.requireActual("react-native")
+
+  type CarouselRenderInfo = {
+    index: number
+    animationValue: { value: number }
+  }
+
+  type CarouselProps = {
+    data: number[]
+    renderItem: (info: CarouselRenderInfo) => React.ReactElement
+    onSnapToItem: (index: number) => void
+  }
+
+  const Carousel = ReactMock.forwardRef(
+    (props: CarouselProps, _ref: React.Ref<never>) => (
+      <RNView testID="carousel">
+        {props.data.map((_: number, index: number) => (
+          <RNPressable
+            key={index}
+            testID={`carousel-page-${index}`}
+            onPress={() => props.onSnapToItem(index)}
+          >
+            {props.renderItem({ index, animationValue: { value: 0 } })}
+          </RNPressable>
+        ))}
+      </RNView>
+    ),
+  )
+  Carousel.displayName = "MockCarousel"
+
+  return { __esModule: true, default: Carousel }
+})
+
+jest.mock("@app/screens/receive-bitcoin-screen/qr-view", () => {
+  const { View: RNView, Text: RNText } = jest.requireActual("react-native")
+  return {
+    QRView: ({ type, loading, err }: { type: string; loading: boolean; err: string }) => (
+      <RNView testID={`qr-view-${type}`}>
+        <RNText>{err || (loading ? "Loading" : `QR-${type}`)}</RNText>
+      </RNView>
+    ),
+  }
+})
+
+const flushAsync = () =>
+  act(
+    () =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 0)
+      }),
+  )
+
+// Some app handlers log placeholder/diagnostic messages via console.log when
+// pressed (e.g. "starting scanNFCTag" in modal-nfc); capture them so expected logs don't pollute CI logs.
+let consoleLogSpy: jest.SpyInstance
+
+beforeEach(() => {
+  consoleLogSpy = jest.spyOn(console, "log").mockImplementation(() => {})
+})
+
+afterEach(() => {
+  consoleLogSpy.mockRestore()
+})
+
+describe("ReceiveScreen", () => {
+  let LL: ReturnType<typeof i18nObject>
+
+  beforeAll(() => {
+    loadLocale("en")
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    LL = i18nObject("en")
+  })
+
+  describe("UI structure", () => {
+    it.each([
+      { name: "receive-screen container", testId: "receive-screen" },
+      { name: "carousel", testId: "carousel" },
+      { name: "page 0 (Lightning/PayCode)", testId: "carousel-page-0" },
+      { name: "page 1 (OnChain)", testId: "carousel-page-1" },
+      { name: "onchain QR on page 1", testId: "qr-view-OnChain" },
+      { name: "payment identifier", testId: "readable-payment-request" },
+    ])("renders $name", async ({ testId }) => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      expect(screen.getByTestId(testId)).toBeTruthy()
+    })
+
+    it("renders copy and share action buttons", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      expect(screen.getByText(LL.ReceiveScreen.copyInvoice())).toBeTruthy()
+      expect(screen.getByText(LL.ReceiveScreen.shareInvoice())).toBeTruthy()
+    })
+  })
+
+  describe("PayCode flow (username present)", () => {
+    it("renders PayCode QR on page 0", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+        expect(screen.getByText("QR-PayCode")).toBeTruthy()
+      })
+    })
+
+    it("shows lightning address as payment identifier", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText("test1@blink.sv")).toBeTruthy()
+      })
+    })
+
+    it("copies paycode to clipboard when pressing copy button", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText("test1@blink.sv")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByText(LL.ReceiveScreen.copyInvoice()))
+
+      expect(Clipboard.setString).toHaveBeenCalledTimes(1)
+    })
+
+    it("copies paycode when tapping payment identifier", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText("test1@blink.sv")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByText("test1@blink.sv"))
+
+      expect(Clipboard.setString).toHaveBeenCalledTimes(1)
+    })
+
+    it("shares paycode when pressing share button", async () => {
+      const shareSpy = jest.spyOn(Share, "share").mockResolvedValue({
+        action: Share.sharedAction,
+      })
+
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText("test1@blink.sv")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByText(LL.ReceiveScreen.shareInvoice()))
+
+      await flushAsync()
+
+      expect(shareSpy).toHaveBeenCalledTimes(1)
+
+      shareSpy.mockRestore()
+    })
+  })
+
+  describe("OnChain flow (page 1)", () => {
+    it("fetches onchain address on mount", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(onChainAddressCurrentMock).toHaveBeenCalled()
+      })
+
+      await flushEffects()
+    })
+
+    it("renders OnChain QR on page 1", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      expect(screen.getByTestId("qr-view-OnChain")).toBeTruthy()
+      expect(screen.getByText("QR-OnChain")).toBeTruthy()
+    })
+
+    it("shows truncated onchain address after swiping to page 1", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("carousel-page-1"))
+
+      await waitFor(() => {
+        expect(screen.getByText("tb1qstk6xu...w05pc7lmz5")).toBeTruthy()
+      })
+    })
+
+    it("copies onchain address when pressing copy on page 1", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("carousel-page-1"))
+
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByText(LL.ReceiveScreen.copyInvoice()))
+
+      expect(Clipboard.setString).toHaveBeenCalledWith(
+        "tb1qstk6xund50xqcrnz7vsly2rke6xpw05pc7lmz5",
+      )
+    })
+
+    it("shares onchain address when pressing share on page 1", async () => {
+      const shareSpy = jest.spyOn(Share, "share").mockResolvedValue({
+        action: Share.sharedAction,
+      })
+
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("carousel-page-1"))
+
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByText(LL.ReceiveScreen.shareInvoice()))
+
+      await flushAsync()
+
+      expect(shareSpy).toHaveBeenCalledWith({
+        message: "tb1qstk6xund50xqcrnz7vsly2rke6xpw05pc7lmz5",
+      })
+
+      shareSpy.mockRestore()
+    })
+  })
+
+  describe("Note input", () => {
+    it("is editable on onchain page", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("carousel-page-1"))
+
+      await flushAsync()
+      await flushAsync()
+
+      expect(screen.getByTestId("add-note").props.editable).toBe(true)
+    })
+  })
+
+  describe("Wallet toggle (BTC default)", () => {
+    it("switches from PayCode to Lightning when toggling wallet", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText("QR-PayCode")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      })
+    })
+
+    it("reverts to PayCode when toggling back to BTC with no content", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText("QR-PayCode")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+      })
+    })
+  })
+
+  describe("USD default account", () => {
+    beforeEach(() => {
+      paymentRequestQueryMock.mockReturnValue(makeQueryResult("usd-wallet-id"))
+    })
+
+    afterEach(() => {
+      paymentRequestQueryMock.mockReturnValue(makeQueryResult())
+    })
+
+    it("starts on Lightning instead of PayCode", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      })
+
+      expect(screen.queryByTestId("qr-view-PayCode")).toBeNull()
+    })
+
+    it("reverts to PayCode when toggling to BTC with no content", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+      })
+    })
+  })
+
+  describe("NFC without amount", () => {
+    beforeEach(() => {
+      jest.mocked(nfcManager.isSupported).mockResolvedValue(true)
+    })
+
+    afterEach(() => {
+      jest.mocked(nfcManager.isSupported).mockResolvedValue(false)
+    })
+
+    it("opens amount input when pressing NFC icon on PayCode", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText("QR-PayCode")).toBeTruthy()
+      })
+
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("nfc-icon"))
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByText(LL.AmountInputScreen.setAmount())).toBeTruthy()
+      })
+    })
+
+    it("opens amount input when pressing NFC icon on Lightning invoice", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText("QR-PayCode")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      })
+
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("nfc-icon"))
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByText(LL.AmountInputScreen.setAmount())).toBeTruthy()
+      })
+    })
+
+    it("applies NFC amount when Set Amount is pressed", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText("QR-PayCode")).toBeTruthy()
+      })
+
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("nfc-icon"))
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByText(LL.AmountInputScreen.setAmount())).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByTestId("Key 2"))
+      await flushAsync()
+
+      fireEvent.press(screen.getByText(LL.AmountInputScreen.setAmount()))
+
+      await waitFor(() => {
+        expect(lnInvoiceCreateMock).toHaveBeenCalled()
+      })
+
+      await flushEffects()
+    })
+  })
+
+  describe("data hooks integration", () => {
+    it("calls paymentRequestQuery on mount", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+
+      expect(paymentRequestQueryMock).toHaveBeenCalled()
+    })
+
+    it("calls priceConversion hook on mount", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+
+      expect(priceConversionMock).toHaveBeenCalled()
+    })
+  })
+
+  describe("Wallet toggle preserves wallet across type changes (BTC default)", () => {
+    beforeEach(() => {
+      paymentRequestQueryMock.mockReturnValue(makeQueryResult())
+    })
+
+    it("switches to Dollar wallet when toggling from PayCode", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+        expect(screen.getByText(/test1@/)).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+        expect(screen.getByText("Dollar")).toBeTruthy()
+      })
+    })
+
+    it("round-trips PayCode → Lightning → PayCode", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+        expect(screen.getByText(/test1@/)).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+        expect(screen.getByText("Dollar")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+        expect(screen.getByText("Bitcoin")).toBeTruthy()
+      })
+    })
+  })
+
+  describe("Wallet toggle preserves wallet across type changes (USD default)", () => {
+    beforeEach(() => {
+      paymentRequestQueryMock.mockReturnValue(makeQueryResult("usd-wallet-id"))
+    })
+
+    afterEach(() => {
+      paymentRequestQueryMock.mockReturnValue(makeQueryResult())
+    })
+
+    it("starts Lightning with Dollar wallet", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+        expect(screen.getByText("Dollar")).toBeTruthy()
+      })
+    })
+
+    it("toggles to PayCode with Bitcoin wallet", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+        expect(screen.getByText("Bitcoin")).toBeTruthy()
+      })
+    })
+
+    it("round-trips Lightning → PayCode → Lightning", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByText("Dollar")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+        expect(screen.getByText(/test1@/)).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+        expect(screen.getByText("Dollar")).toBeTruthy()
+      })
+    })
+  })
+
+  describe("Carousel page navigation does not change wallet", () => {
+    it("BTC default: swipe to OnChain and back keeps Lightning wallet", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+        expect(screen.getByText("Bitcoin")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByTestId("carousel-page-1"))
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("carousel-page-0"))
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByText("Bitcoin")).toBeTruthy()
+      })
+    })
+
+    it("USD default: swipe to OnChain and back keeps Lightning wallet", async () => {
+      paymentRequestQueryMock.mockReturnValue(makeQueryResult("usd-wallet-id"))
+
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+        expect(screen.getByText("Dollar")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByTestId("carousel-page-1"))
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("carousel-page-0"))
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByText("Dollar")).toBeTruthy()
+      })
+
+      paymentRequestQueryMock.mockReturnValue(makeQueryResult())
+    })
+
+    it("toggle USD on OnChain then back shows Dollar on page 0", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+        expect(screen.getByText(/test1@/)).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByTestId("carousel-page-1"))
+      await flushAsync()
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("carousel-page-0"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+        expect(screen.getByText("Dollar")).toBeTruthy()
+      })
+    })
+
+    it("toggle on OnChain syncs wallet to page 0", async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+        expect(screen.getByText(/test1@/)).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+        expect(screen.getByText("Dollar")).toBeTruthy()
+      })
+
+      fireEvent.press(screen.getByTestId("carousel-page-1"))
+      await flushAsync()
+
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      await flushAsync()
+
+      fireEvent.press(screen.getByTestId("carousel-page-0"))
+      await flushAsync()
+
+      await waitFor(() => {
+        expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+        expect(screen.getByText("Bitcoin")).toBeTruthy()
+      })
+    })
+  })
+})
+
+describe("Setting amount preserves wallet after round-trip toggle", () => {
+  let LL: ReturnType<typeof i18nObject>
+
+  beforeAll(() => {
+    loadLocale("en")
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    LL = i18nObject("en")
+  })
+
+  it("BTC default: keeps Bitcoin wallet", async () => {
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+      expect(screen.getByText(/test1@/)).toBeTruthy()
+      expect(screen.getByText("Bitcoin")).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByLabelText("Toggle wallet"))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(screen.getByText("Dollar")).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByLabelText("Toggle wallet"))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+      expect(screen.getByText("Bitcoin")).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByText(LL.AmountInputButton.tapToSetAmount()))
+    await flushAsync()
+    fireEvent.press(screen.getByTestId("Key 1"))
+    await flushAsync()
+    fireEvent.press(screen.getByText(LL.AmountInputScreen.setAmount()))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(screen.getByText("Bitcoin")).toBeTruthy()
+    })
+  })
+
+  it("USD default: keeps Dollar wallet", async () => {
+    paymentRequestQueryMock.mockReturnValue(makeQueryResult("usd-wallet-id"))
+
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(screen.getByText("Dollar")).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByLabelText("Toggle wallet"))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+      expect(screen.getByText(/test1@/)).toBeTruthy()
+      expect(screen.getByText("Bitcoin")).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByLabelText("Toggle wallet"))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(screen.getByText("Dollar")).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByText(LL.AmountInputButton.tapToSetAmount()))
+    await flushAsync()
+    fireEvent.press(screen.getByTestId("Key 1"))
+    await flushAsync()
+    fireEvent.press(screen.getByText(LL.AmountInputScreen.setAmount()))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(screen.getByText("Dollar")).toBeTruthy()
+    })
+  })
+})
+
+describe("Expiration time follows wallet currency", () => {
+  let LL: ReturnType<typeof i18nObject>
+
+  beforeAll(() => {
+    loadLocale("en")
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    paymentRequestQueryMock.mockReturnValue(makeQueryResult())
+    LL = i18nObject("en")
+  })
+
+  it("BTC default: direct set amount uses 24h expiration", async () => {
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+      expect(screen.getByText(/test1@/)).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByText(LL.AmountInputButton.tapToSetAmount()))
+    await flushAsync()
+    fireEvent.press(screen.getByTestId("Key 1"))
+    await flushAsync()
+    fireEvent.press(screen.getByText(LL.AmountInputScreen.setAmount()))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(lnInvoiceCreateMock).toHaveBeenCalled()
+    })
+
+    expect(lnInvoiceCreateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variables: expect.objectContaining({
+          input: expect.objectContaining({
+            expiresIn: "1440",
+          }),
+        }),
+      }),
+    )
+  })
+
+  it("BTC default: uses 24h expiration after round-trip toggle", async () => {
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+      expect(screen.getByText(/test1@/)).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByLabelText("Toggle wallet"))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(screen.getByText("Dollar")).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByLabelText("Toggle wallet"))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+      expect(screen.getByText(/test1@/)).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByText(LL.AmountInputButton.tapToSetAmount()))
+    await flushAsync()
+    fireEvent.press(screen.getByTestId("Key 1"))
+    await flushAsync()
+    fireEvent.press(screen.getByText(LL.AmountInputScreen.setAmount()))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(lnInvoiceCreateMock).toHaveBeenCalled()
+    })
+
+    expect(lnInvoiceCreateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variables: expect.objectContaining({
+          input: expect.objectContaining({
+            expiresIn: "1440",
+          }),
+        }),
+      }),
+    )
+  })
+
+  it("USD default: uses 5m expiration after round-trip toggle", async () => {
+    paymentRequestQueryMock.mockReturnValue(makeQueryResult("usd-wallet-id"))
+
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(screen.getByText("Dollar")).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByLabelText("Toggle wallet"))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+      expect(screen.getByText(/test1@/)).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByLabelText("Toggle wallet"))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(screen.getByText("Dollar")).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByText(LL.AmountInputButton.tapToSetAmount()))
+    await flushAsync()
+    fireEvent.press(screen.getByTestId("Key 1"))
+    await flushAsync()
+    fireEvent.press(screen.getByText(LL.AmountInputScreen.setAmount()))
+    await flushAsync()
+    await flushAsync()
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+      expect(lnUsdInvoiceCreateMock).toHaveBeenCalled()
+    })
+
+    expect(lnUsdInvoiceCreateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variables: expect.objectContaining({
+          input: expect.objectContaining({
+            expiresIn: "5",
+          }),
+        }),
+      }),
+    )
+  })
+})
+
+describe("Amount modal lifecycle", () => {
+  let LL: ReturnType<typeof i18nObject>
+
+  beforeAll(() => {
+    loadLocale("en")
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    paymentRequestQueryMock.mockReturnValue(makeQueryResult())
+    LL = i18nObject("en")
+  })
+
+  it("applies amount when Set Amount is pressed", async () => {
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-PayCode")).toBeTruthy()
+    })
+
+    await flushAsync()
+    await flushAsync()
+
+    fireEvent.press(screen.getByText(LL.AmountInputButton.tapToSetAmount()))
+    await flushAsync()
+
+    fireEvent.press(screen.getByTestId("Key 3"))
+    await flushAsync()
+
+    fireEvent.press(screen.getByText(LL.AmountInputScreen.setAmount()))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("qr-view-Lightning")).toBeTruthy()
+    })
+
+    expect(lnInvoiceCreateMock).toHaveBeenCalled()
+  })
+})
+
+describe("ReceiveScreen new on-chain address", () => {
+  let LL: ReturnType<typeof i18nObject>
+
+  beforeAll(() => {
+    loadLocale("en")
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    LL = i18nObject("en")
+  })
+
+  const renderOnOnchainPage = async () => {
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+    await flushAsync()
+    await flushAsync()
+    fireEvent.press(screen.getByTestId("carousel-page-1"))
+    await waitFor(() => {
+      expect(screen.getByText("tb1qstk6xu...w05pc7lmz5")).toBeTruthy()
+    })
+  }
+
+  const actionButton = (label: string) => screen.getByLabelText(label)
+  const isDisabled = (label: string) =>
+    Boolean(actionButton(label).props.accessibilityState?.disabled)
+
+  type CurrentResponse = Awaited<ReturnType<typeof onChainAddressCurrentMock>>
+  type CreateResult = Awaited<ReturnType<typeof onChainAddressCreateMock>>
+
+  describe("when the on-chain wallet switches", () => {
+    const btcShown = "tb1qstk6xu...w05pc7lmz5"
+    const usdFetch = { variables: { input: { walletId: "usd-wallet-id" } } }
+
+    // Starts the USD fetch and holds it open; returns a way to fail it.
+    const switchToUsdAndHold = async () => {
+      render(
+        <ContextForScreen headerShown>
+          <ReceiveScreen />
+        </ContextForScreen>,
+      )
+      // The toggle ignores taps until the lightning request is ready.
+      await waitFor(() => {
+        expect(screen.getByText(/test1@/)).toBeTruthy()
+      })
+      fireEvent.press(screen.getByTestId("carousel-page-1"))
+      await waitFor(() => {
+        expect(screen.getByText(btcShown)).toBeTruthy()
+      })
+      let failUsd: (err: Error) => void = () => {}
+      onChainAddressCurrentMock.mockImplementationOnce(
+        () =>
+          new Promise<CurrentResponse>((_, reject) => {
+            failUsd = reject
+          }),
+      )
+      fireEvent.press(screen.getByLabelText("Toggle wallet"))
+      await flushAsync()
+      expect(onChainAddressCurrentMock).toHaveBeenLastCalledWith(usdFetch)
+      return (err: Error) => failUsd(err)
+    }
+
+    it("never shows or copies the BTC address while the USD one loads", async () => {
+      // Regression: the BTC address stayed on the USD page, with Copy and Share live,
+      // until the USD address arrived.
+      await switchToUsdAndHold()
+
+      expect(screen.queryByText(btcShown)).toBeNull()
+      expect(isDisabled(LL.ReceiveScreen.copyInvoice())).toBe(true)
+      expect(isDisabled(LL.ReceiveScreen.shareInvoice())).toBe(true)
+      expect(isDisabled(LL.ReceiveScreen.newAddress())).toBe(true)
+      fireEvent.press(screen.getByTestId("readable-payment-request"))
+      expect(Clipboard.setString).not.toHaveBeenCalled()
+    })
+
+    it("shows the failure and offers New when the USD address fails to load", async () => {
+      // Regression: a failed USD fetch left the BTC address on the USD page for good,
+      // QR included, and the failure state never appeared.
+      const failUsd = await switchToUsdAndHold()
+
+      await act(async () => failUsd(new Error("network")))
+      await flushAsync()
+
+      expect(screen.queryByText(btcShown)).toBeNull()
+      expect(screen.queryByText("QR-OnChain")).toBeNull()
+      expect(screen.getByText(LL.ReceiveScreen.onchainAddressLoadFailed())).toBeTruthy()
+      expect(isDisabled(LL.ReceiveScreen.copyInvoice())).toBe(true)
+      expect(isDisabled(LL.ReceiveScreen.newAddress())).toBe(false)
+    })
+  })
+
+  it("keeps New disabled while the first address loads", async () => {
+    onChainAddressCurrentMock.mockImplementationOnce(
+      () => new Promise<CurrentResponse>(() => {}),
+    )
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+    await flushAsync()
+    await flushAsync()
+    fireEvent.press(screen.getByTestId("carousel-page-1"))
+    await flushAsync()
+
+    expect(isDisabled(LL.ReceiveScreen.newAddress())).toBe(true)
+    expect(isDisabled(LL.ReceiveScreen.copyInvoice())).toBe(true)
+    expect(screen.queryByText(LL.ReceiveScreen.onchainAddressLoadFailed())).toBeNull()
+  })
+
+  it("hides the load error while New retries, and brings it back if the retry fails", async () => {
+    onChainAddressCurrentMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("network")),
+    )
+    let failCreate: (err: Error) => void = () => {}
+    onChainAddressCreateMock.mockImplementationOnce(
+      () =>
+        new Promise<CreateResult>((_, reject) => {
+          failCreate = reject
+        }),
+    )
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+    await flushAsync()
+    await flushAsync()
+    fireEvent.press(screen.getByTestId("carousel-page-1"))
+    await flushAsync()
+    expect(screen.getByText(LL.ReceiveScreen.onchainAddressLoadFailed())).toBeTruthy()
+
+    fireEvent.press(screen.getByText(LL.ReceiveScreen.newAddress()))
+    await flushAsync()
+
+    expect(screen.queryByText(LL.ReceiveScreen.onchainAddressLoadFailed())).toBeNull()
+    expect(actionButton(LL.ReceiveScreen.newAddress()).props.accessibilityState).toEqual(
+      expect.objectContaining({ disabled: true, busy: true }),
+    )
+    expect(isDisabled(LL.ReceiveScreen.copyInvoice())).toBe(true)
+
+    await act(async () => failCreate(new Error("still offline")))
+    await flushAsync()
+
+    expect(screen.getByText(LL.ReceiveScreen.onchainAddressLoadFailed())).toBeTruthy()
+    expect(isDisabled(LL.ReceiveScreen.newAddress())).toBe(false)
+    expect(toastShow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: LL.ReceiveScreen.newAddressFailed(),
+        type: "error",
+      }),
+    )
+  })
+
+  it("keeps the current address on screen while New makes another", async () => {
+    onChainAddressCreateMock.mockImplementationOnce(
+      () => new Promise<CreateResult>(() => {}),
+    )
+    await renderOnOnchainPage()
+
+    fireEvent.press(screen.getByText(LL.ReceiveScreen.newAddress()))
+    await flushAsync()
+
+    expect(screen.getByText("tb1qstk6xu...w05pc7lmz5")).toBeTruthy()
+    expect(screen.getByText("QR-OnChain")).toBeTruthy()
+    expect(isDisabled(LL.ReceiveScreen.copyInvoice())).toBe(false)
+  })
+
+  it("is only offered on the on-chain page", async () => {
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+    await flushAsync()
+    await flushAsync()
+
+    expect(screen.queryByText(LL.ReceiveScreen.newAddress())).toBeNull()
+
+    fireEvent.press(screen.getByTestId("carousel-page-1"))
+
+    await waitFor(() => {
+      expect(screen.getByText(LL.ReceiveScreen.newAddress())).toBeTruthy()
+    })
+  })
+
+  it("shows the freshly created address and confirms it", async () => {
+    await renderOnOnchainPage()
+
+    fireEvent.press(screen.getByText(LL.ReceiveScreen.newAddress()))
+
+    await waitFor(() => {
+      expect(screen.getByText("tb1qfresha...xxxx9fresh")).toBeTruthy()
+    })
+    expect(onChainAddressCreateMock).toHaveBeenCalledWith({
+      variables: { input: { walletId: "btc-wallet-id" } },
+    })
+    expect(toastShow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: LL.ReceiveScreen.newAddressGenerated(),
+        type: "success",
+      }),
+    )
+  })
+
+  it("creates one address for a double tap", async () => {
+    await renderOnOnchainPage()
+
+    // Both taps reach the handler before React re-renders, which is the case the
+    // in-flight guard exists for: fireEvent would see the disabled button and skip.
+    const { onPress } = screen
+      .UNSAFE_getAllByType(ActionButton)
+      .find((button) => button.props.label === LL.ReceiveScreen.newAddress())!.props
+    await act(async () => {
+      onPress()
+      onPress()
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText("tb1qfresha...xxxx9fresh")).toBeTruthy()
+    })
+    expect(onChainAddressCreateMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("locks the wallet toggle until the new address arrives", async () => {
+    type CreateResponse = Awaited<ReturnType<typeof onChainAddressCreateMock>>
+    let resolveCreate: (value: CreateResponse) => void = () => {}
+    onChainAddressCreateMock.mockImplementationOnce(
+      () =>
+        new Promise<CreateResponse>((resolve) => {
+          resolveCreate = resolve
+        }),
+    )
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+    // The toggle ignores taps until the lightning request is ready.
+    await waitFor(() => {
+      expect(screen.getByText(/test1@/)).toBeTruthy()
+    })
+    fireEvent.press(screen.getByTestId("carousel-page-1"))
+    await waitFor(() => {
+      expect(screen.getByText("tb1qstk6xu...w05pc7lmz5")).toBeTruthy()
+    })
+    const usdFetch = { variables: { input: { walletId: "usd-wallet-id" } } }
+
+    fireEvent.press(screen.getByText(LL.ReceiveScreen.newAddress()))
+    await flushAsync()
+    fireEvent.press(screen.getByLabelText("Toggle wallet"))
+    await flushAsync()
+    await flushAsync()
+
+    expect(onChainAddressCurrentMock).not.toHaveBeenCalledWith(usdFetch)
+
+    resolveCreate({
+      data: {
+        onChainAddressCreate: {
+          errors: [],
+          address: "tb1qfreshaddressxxxxxxxxxxxxxxxxxxxxxxx9fresh",
+        },
+      },
+    })
+    await waitFor(() => {
+      expect(screen.getByText("tb1qfresha...xxxx9fresh")).toBeTruthy()
+    })
+
+    fireEvent.press(screen.getByLabelText("Toggle wallet"))
+    await flushAsync()
+    await flushAsync()
+
+    expect(onChainAddressCurrentMock).toHaveBeenCalledWith(usdFetch)
+  })
+
+  it("keeps the current address and reports the failure", async () => {
+    onChainAddressCreateMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("network")),
+    )
+    await renderOnOnchainPage()
+
+    fireEvent.press(screen.getByText(LL.ReceiveScreen.newAddress()))
+
+    await waitFor(() => {
+      expect(toastShow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: LL.ReceiveScreen.newAddressFailed(),
+          type: "error",
+        }),
+      )
+    })
+    expect(screen.getByText("tb1qstk6xu...w05pc7lmz5")).toBeTruthy()
+  })
+
+  it("offers only New after the current address failed to load, and recovers", async () => {
+    onChainAddressCurrentMock.mockImplementationOnce(() =>
+      Promise.reject(new Error("network")),
+    )
+    render(
+      <ContextForScreen headerShown>
+        <ReceiveScreen />
+      </ContextForScreen>,
+    )
+    await flushAsync()
+    await flushAsync()
+    fireEvent.press(screen.getByTestId("carousel-page-1"))
+    await flushAsync()
+
+    const identifier = screen.getByTestId("readable-payment-request")
+    expect(identifier.props.children).toBeFalsy()
+    expect(screen.getByText(LL.ReceiveScreen.onchainAddressLoadFailed())).toBeTruthy()
+    expect(screen.queryByText("QR-OnChain")).toBeNull()
+    fireEvent.press(identifier)
+    expect(Clipboard.setString).not.toHaveBeenCalled()
+
+    expect(actionButton(LL.ReceiveScreen.copyInvoice()).props.accessibilityState).toEqual(
+      expect.objectContaining({ disabled: true }),
+    )
+    fireEvent.press(screen.getByText(LL.ReceiveScreen.copyInvoice()))
+    expect(Clipboard.setString).not.toHaveBeenCalled()
+    expect(isDisabled(LL.ReceiveScreen.newAddress())).toBe(false)
+
+    fireEvent.press(screen.getByText(LL.ReceiveScreen.newAddress()))
+
+    await waitFor(() => {
+      expect(screen.getByText("tb1qfresha...xxxx9fresh")).toBeTruthy()
+    })
+    expect(toastShow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: LL.ReceiveScreen.newAddressGenerated(),
+        type: "success",
+      }),
+    )
+  })
+
+  it("tells the user to wait when the API rate-limits new addresses", async () => {
+    onChainAddressCreateMock.mockImplementationOnce(() =>
+      Promise.resolve({
+        data: {
+          onChainAddressCreate: {
+            errors: [{ message: "Too many", code: "TOO_MANY_REQUEST" }],
+            address: null,
+          },
+        },
+      }),
+    )
+    await renderOnOnchainPage()
+
+    fireEvent.press(screen.getByText(LL.ReceiveScreen.newAddress()))
+
+    await waitFor(() => {
+      expect(toastShow).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: LL.ReceiveScreen.newAddressRateLimited(),
+          type: "error",
+        }),
+      )
+    })
+    expect(screen.getByText("tb1qstk6xu...w05pc7lmz5")).toBeTruthy()
+  })
+})

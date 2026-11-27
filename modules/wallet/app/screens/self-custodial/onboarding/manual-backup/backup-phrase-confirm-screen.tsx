@@ -1,0 +1,314 @@
+import React, { useCallback, useEffect, useRef } from "react"
+import { TextInput, View } from "react-native"
+import { MAX_FONT_SIZE_MULTIPLIER } from "@app/rne-theme/text-scaling"
+
+import { makeStyles, Text, useTheme } from "@rn-vui/themed"
+import { useNavigation, useRoute, RouteProp } from "@react-navigation/native"
+import { NativeStackNavigationProp } from "@react-navigation/native-stack"
+
+import { radius } from "@app/rne-theme/radius"
+import { GaloyIcon } from "@app/components/atomic/galoy-icon"
+import { GaloyPrimaryButton } from "@app/components/atomic/galoy-primary-button"
+import { Screen } from "@app/components/screen"
+import { ScreenSecurityGate } from "@app/components/screen-security-gate"
+import { SuggestionBar } from "@app/components/suggestion-bar"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { PhraseStep, RootStackParamList } from "@app/navigation/stack-param-lists"
+import { useMigrationCheckpoint } from "@app/screens/account-migration/hooks"
+import { logSelfCustodialBackupCompleted } from "@app/self-custodial/analytics"
+import { BackupMethod } from "@app/self-custodial/providers/backup-state"
+import { reportError } from "@app/utils/error-logging"
+import { testProps } from "@app/utils/testProps"
+import { fonts } from "@app/rne-theme/fonts"
+
+import { useBackupConfirm, useCompleteBackup } from "../hooks"
+import { type Challenge, isValidChallenges } from "../utils"
+
+type ConfirmRouteProp = RouteProp<RootStackParamList, "selfCustodialBackupPhraseConfirm">
+
+type BackupPhraseConfirmContentProps = {
+  challenges: Challenge[]
+  checkpointLoading: boolean
+  confirm: ReturnType<typeof useBackupConfirm>
+  onComplete: () => void
+}
+
+/** The gate mounts this only once the screenshot guard is actually on — the typed
+ *  words must not exist while registration is pending. The answers themselves are
+ *  held above the gate and handed in, so an unmount hides them without wiping
+ *  what the user has already typed. */
+const BackupPhraseConfirmContent: React.FC<BackupPhraseConfirmContentProps> = ({
+  challenges,
+  checkpointLoading,
+  confirm,
+  onComplete,
+}) => {
+  const { LL } = useI18nContext()
+  const styles = useStyles()
+  const {
+    theme: { colors },
+  } = useTheme()
+
+  const {
+    inputs,
+    activeIndex,
+    activeSuggestions,
+    allCorrect,
+    allFilled,
+    updateInput,
+    setActiveIndex,
+    selectSuggestion,
+    isWordCorrect,
+    isWordWrong,
+    focusRequest,
+    clearFocusRequest,
+  } = confirm
+
+  const anyWrong = challenges.some((_, i) => isWordWrong(i))
+  const isConfirmDisabled = !allCorrect || checkpointLoading
+
+  const inputRefs = useRef<Array<TextInput | null>>([])
+
+  useEffect(() => {
+    if (focusRequest === null) return
+    inputRefs.current[focusRequest]?.focus()
+    clearFocusRequest()
+  }, [focusRequest, clearFocusRequest])
+
+  return (
+    <Screen preset="fixed" keyboardShouldPersistTaps="handled">
+      <View style={styles.container}>
+        <View style={styles.content}>
+          <Text style={styles.subtitle}>
+            {LL.BackupScreen.ManualBackup.Confirm.subtitle()}
+          </Text>
+
+          <View style={styles.inputList}>
+            {challenges.map((challenge, i) => {
+              const correct = inputs[i].trim().length > 0 && isWordCorrect(i)
+              const wrong = isWordWrong(i)
+              return (
+                <View key={challenge.index}>
+                  <View
+                    style={[
+                      styles.inputContainer,
+                      correct && styles.inputCorrect,
+                      wrong && styles.inputError,
+                    ]}
+                  >
+                    {/* Always mounted, fixed width: the row's layout must not depend on
+                     *  the input's content, or the first keystroke reflows the field
+                     *  under the user's finger. */}
+                    <Text
+                      style={[
+                        styles.wordNumber,
+                        inputs[i].trim().length === 0 && styles.wordNumberHidden,
+                      ]}
+                    >
+                      {challenge.index + 1}.
+                    </Text>
+                    <TextInput
+                      maxFontSizeMultiplier={MAX_FONT_SIZE_MULTIPLIER}
+                      ref={(ref) => {
+                        inputRefs.current[i] = ref
+                      }}
+                      style={styles.input}
+                      placeholder={`${LL.BackupScreen.ManualBackup.Confirm.enterWord()} ${challenge.index + 1}`}
+                      placeholderTextColor={colors.textMuted}
+                      value={inputs[i]}
+                      onChangeText={(text) => {
+                        updateInput(i, text)
+                        setActiveIndex(i)
+                      }}
+                      onFocus={() => setActiveIndex(i)}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      keyboardType="visible-password"
+                      {...testProps(`confirm-word-${challenge.index}`)}
+                    />
+                    <GaloyIcon name="pencil" size={16} color={colors.accent} />
+                  </View>
+                </View>
+              )
+            })}
+          </View>
+
+          <View style={styles.errorContainer}>
+            {anyWrong && (
+              <>
+                <GaloyIcon name="warning" size={14} color={colors.error} />
+                <Text style={styles.errorText}>
+                  {LL.BackupScreen.ManualBackup.Confirm.incorrectWord()}
+                </Text>
+              </>
+            )}
+          </View>
+        </View>
+
+        {activeIndex !== undefined && (
+          <SuggestionBar
+            suggestions={activeSuggestions}
+            onSelect={(word) => selectSuggestion(activeIndex, word)}
+          />
+        )}
+
+        <View style={styles.buttonsContainer}>
+          <GaloyPrimaryButton
+            title={
+              allFilled
+                ? LL.BackupScreen.ManualBackup.Confirm.confirm()
+                : LL.BackupScreen.ManualBackup.Confirm.enterWords()
+            }
+            disabled={isConfirmDisabled}
+            onPress={onComplete}
+            {...testProps("backup-confirm-button")}
+          />
+        </View>
+      </View>
+    </Screen>
+  )
+}
+
+/** Deep links and navigation-state rehydration can deliver missing or malformed params
+ *  despite the route type; a bare destructure in the content threw into the app-wide
+ *  ErrorBoundary, replacing the whole navigation tree (#4070). A confirm screen without
+ *  its challenges is dead — nothing to type — so it redirects to the first backup step
+ *  with `replace`, keeping the broken route out of the back stack.
+ *
+ *  This runs ahead of the gate, not inside the gated content: on a device where
+ *  registration keeps failing the content never mounts, and a redirect living behind
+ *  the gate would leave the user stuck on the guard's Retry/Back view with no way
+ *  back to the self-heal. */
+const RedirectToBackupStart: React.FC = () => {
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>()
+
+  useEffect(() => {
+    reportError(
+      "Backup confirm route params missing",
+      new Error("Route delivered no valid challenges"),
+      { dedupKey: "backup-confirm-params-missing", alwaysRecord: true },
+    )
+    navigation.replace("selfCustodialBackupPhrase", { step: PhraseStep.First })
+  }, [navigation])
+
+  return null
+}
+
+type GatedConfirmProps = {
+  challenges: Challenge[]
+  successMessage?: string
+}
+
+/** Sits between the redirect guard and the gate so the confirmation state can be
+ *  held above the gate: its subtree is unmounted every time the gate re-activates
+ *  (a theme flip re-acquires the guard to apply the new mask color), and the words
+ *  the user has already typed must survive that. Safe here because
+ *  useBackupConfirm's only effect is the all-correct auto-advance, which cannot
+ *  fire while the inputs are empty. */
+const GatedConfirm: React.FC<GatedConfirmProps> = ({ challenges, successMessage }) => {
+  const { loading: checkpointLoading } = useMigrationCheckpoint()
+  const completeBackup = useCompleteBackup()
+
+  const onComplete = useCallback(() => {
+    logSelfCustodialBackupCompleted({ backupMethod: "manual" })
+    completeBackup({ method: BackupMethod.Manual, message: successMessage })
+  }, [completeBackup, successMessage])
+
+  const confirm = useBackupConfirm({
+    challenges,
+    onComplete,
+    disabled: checkpointLoading,
+  })
+
+  return (
+    <ScreenSecurityGate>
+      <BackupPhraseConfirmContent
+        challenges={challenges}
+        checkpointLoading={checkpointLoading}
+        confirm={confirm}
+        onComplete={onComplete}
+      />
+    </ScreenSecurityGate>
+  )
+}
+
+export const BackupPhraseConfirmScreen: React.FC = () => {
+  const { params } = useRoute<ConfirmRouteProp>()
+  const challenges = params?.challenges
+
+  /** The one place the params are judged: the validated value is handed down, so
+   *  nothing below re-derives it and the two checks cannot drift apart. */
+  if (!isValidChallenges(challenges)) return <RedirectToBackupStart />
+
+  return <GatedConfirm challenges={challenges} successMessage={params?.successMessage} />
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  container: {
+    flex: 1,
+    justifyContent: "space-between",
+  },
+  content: {
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    gap: 23,
+  },
+  subtitle: {
+    fontSize: 16,
+    lineHeight: 22,
+  },
+  inputList: {
+    gap: 10,
+  },
+  inputContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.surfaceInteractive,
+    borderRadius: radius.default,
+    borderWidth: 1,
+    borderColor: colors.transparent,
+    minHeight: 50,
+    paddingHorizontal: 14,
+    gap: 12,
+  },
+  /** Same typeface and no lineHeight override on number and input, so both center on
+   *  one baseline (see MnemonicWordInput). */
+  wordNumber: {
+    width: 24,
+    fontSize: 14,
+    color: colors.textMuted,
+  },
+  wordNumberHidden: {
+    opacity: 0,
+  },
+  inputCorrect: {
+    borderColor: colors.success,
+  },
+  inputError: {
+    borderColor: colors.error,
+  },
+  input: {
+    flex: 1,
+    fontSize: 14,
+    color: colors.textOnBackground,
+    fontFamily: fonts.regular,
+  },
+  errorContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    minHeight: 20,
+  },
+  errorText: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: colors.error,
+  },
+  buttonsContainer: {
+    gap: 10,
+    paddingHorizontal: 20,
+    paddingBottom: 20,
+    paddingTop: 10,
+  },
+}))

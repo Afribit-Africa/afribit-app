@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "wallet",
+  "displayName": { "en": "Wallet", "sw": "Pochi" },
+  "tagline": { "en": "Self-custodial Bitcoin. Your keys, your sats.", "sw": "Bitcoin unayoimiliki mwenyewe. Funguo zako, sats zako." },
+  "version": "1.0.0",
+  "owner": "afribit-africa",
+  "license": "MIT (Blink fork) + internal",
+  "classification": "A",
+  "kind": "native",
+  "readiness": "available",
+  "category": "money",
+  "requires": { "network": "internet", "account": false },
+  "requestedCapabilities": ["app.openService"],
+  "networkDomains": [],
+  "isolation": { "process": "builtin", "storageNamespace": "feature.wallet" },
+  "minimumHostContract": "1.0"
+}

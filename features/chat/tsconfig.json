@@ -1,0 +1,5 @@
+{
+  "extends": "../../apps/shell/tsconfig.json",
+  "compilerOptions": { "noEmit": true, "types": ["node", "react", "react-native"] },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "preview/**/*.ts", "preview/**/*.tsx"]
+}

@@ -1,0 +1,1051 @@
+import React from "react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react-native"
+import { loadLocale } from "@app/i18n/i18n-util.sync"
+import { i18nObject } from "@app/i18n/i18n-util"
+import { MockedProvider } from "@apollo/client/testing"
+import { RouteProp } from "@react-navigation/native"
+
+import { createCache } from "@app/graphql/cache"
+import { IsAuthedContextProvider } from "@app/graphql/is-authed-context"
+import mocks from "@app/graphql/mocks"
+import { RootStackParamList } from "@app/navigation/stack-param-lists"
+import SendBitcoinCompletedScreen from "@app/screens/send-bitcoin-screen/send-bitcoin-completed-screen"
+
+import { ContextForScreen, ContextForScreenWithTheme } from "./helper"
+import { AppStateStatus, Linking, View, ViewStyle } from "react-native"
+import { light, dark } from "@app/rne-theme/colors"
+import { AccountType } from "@app/types/wallet"
+
+const screenshotState = { isTakingScreenshot: false }
+const mockCaptureAndShare = jest.fn()
+
+jest.mock("@app/hooks", () => ({
+  ...jest.requireActual("@app/hooks"),
+  useScreenshot: () => ({
+    isTakingScreenshot: screenshotState.isTakingScreenshot,
+    captureAndShare: mockCaptureAndShare,
+  }),
+}))
+
+jest.mock("react-native-view-shot", () => {
+  return {
+    __esModule: true,
+    default: ({ children, style }: { children: React.ReactNode; style?: ViewStyle }) => (
+      <View style={style} testID="view-shot">
+        {children}
+      </View>
+    ),
+  }
+})
+
+const mockUseActiveWallet = jest.fn()
+jest.mock("@app/hooks/use-active-wallet", () => ({
+  useActiveWallet: () => mockUseActiveWallet(),
+}))
+
+const mockSettingsScreenQuery = jest.fn()
+jest.mock("@app/graphql/generated", () => {
+  const actual = jest.requireActual("@app/graphql/generated")
+  return {
+    ...actual,
+    useSettingsScreenQuery: (opts: unknown) => mockSettingsScreenQuery(opts),
+  }
+})
+
+const custodialActiveWallet = {
+  isSelfCustodial: false,
+  isReady: true,
+  needsBackendAuth: true,
+  status: "ready",
+  accountType: AccountType.Custodial,
+  wallets: [],
+}
+
+const mockNavigate = jest.fn()
+const mockPopToTop = jest.fn()
+const mockIsFocused = jest.fn(() => true)
+const mockFocusListeners: Array<() => void> = []
+const mockNavigation = {
+  navigate: mockNavigate,
+  popToTop: mockPopToTop,
+  isFocused: mockIsFocused,
+  addListener: (event: string, handler: () => void) => {
+    if (event !== "focus") {
+      throw new Error(`Trying to subscribe to unknown navigation event: ${event}`)
+    }
+    mockFocusListeners.push(handler)
+    return () => {
+      const index = mockFocusListeners.indexOf(handler)
+      if (index !== -1) {
+        mockFocusListeners.splice(index, 1)
+      }
+    }
+  },
+}
+jest.mock("@react-navigation/native", () => {
+  const actual = jest.requireActual("@react-navigation/native")
+  return {
+    ...actual,
+    useNavigation: () => mockNavigation,
+  }
+})
+
+let mockAppStateCurrentState: AppStateStatus = "active"
+const mockAppStateListeners: Array<(state: AppStateStatus) => void> = []
+jest.mock("react-native/Libraries/AppState/AppState", () => ({
+  __esModule: true,
+  default: {
+    get currentState() {
+      return mockAppStateCurrentState
+    },
+    addEventListener: (event: string, handler: (state: AppStateStatus) => void) => {
+      if (event !== "change") {
+        throw new Error(`Trying to subscribe to unknown event: ${event}`)
+      }
+      mockAppStateListeners.push(handler)
+      return {
+        remove: () => {
+          const index = mockAppStateListeners.indexOf(handler)
+          if (index !== -1) {
+            mockAppStateListeners.splice(index, 1)
+          }
+        },
+      }
+    },
+  },
+}))
+
+jest.useFakeTimers()
+
+const MockedScreen = ({
+  route,
+}: {
+  route: RouteProp<RootStackParamList, "sendBitcoinCompleted">
+}) => (
+  <MockedProvider mocks={mocks} cache={createCache()}>
+    <IsAuthedContextProvider value={true}>
+      <SendBitcoinCompletedScreen route={route} />
+    </IsAuthedContextProvider>
+  </MockedProvider>
+)
+
+const successRoute = {
+  key: "sendBitcoinCompleted",
+  name: "sendBitcoinCompleted",
+  params: {
+    status: "SUCCESS",
+    arrivalAtMempoolEstimate: undefined,
+  },
+} as const
+
+const Success = () => <MockedScreen route={successRoute} />
+
+const queuedRoute = {
+  key: "sendBitcoinCompleted",
+  name: "sendBitcoinCompleted",
+  params: {
+    status: "PENDING",
+    arrivalAtMempoolEstimate: 10000,
+  },
+} as const
+
+const Queued = () => <MockedScreen route={queuedRoute} />
+
+const pendingRoute = {
+  key: "sendBitcoinCompleted",
+  name: "sendBitcoinCompleted",
+  params: {
+    status: "PENDING",
+    arrivalAtMempoolEstimate: undefined,
+  },
+} as const
+
+const Pending = () => <MockedScreen route={pendingRoute} />
+
+const SuccessAction = ({
+  route,
+}: {
+  route: RouteProp<RootStackParamList, "sendBitcoinCompleted">
+}) => <MockedScreen route={route} />
+
+const timedRoute = {
+  key: "sendBitcoinCompleted",
+  name: "sendBitcoinCompleted",
+  params: {
+    status: "SUCCESS",
+    currencyAmount: "$0.03",
+    satAmount: "25 SAT",
+    currencyFeeAmount: "$0.00",
+    satFeeAmount: "0 SAT",
+    destination: "alice",
+    paymentType: "lightning",
+    createdAt: 1747691078,
+  },
+} as const
+
+const STALE_TRIP_MS = 31_000
+const QUICK_TRIP_MS = 5_000
+
+const triggerAppStateChange = (nextState: AppStateStatus) => {
+  expect(mockAppStateListeners).toHaveLength(1)
+  act(() => {
+    mockAppStateListeners[0](nextState)
+  })
+}
+
+const triggerFocus = () => {
+  expect(mockFocusListeners).toHaveLength(1)
+  act(() => {
+    mockFocusListeners[0]()
+  })
+}
+
+const advanceTime = (ms: number) => {
+  act(() => {
+    jest.advanceTimersByTime(ms)
+  })
+}
+
+/** Moves the clock the hook reads without firing the success-icon timer, so a trip can be
+ *  taken from the icon phase rather than the receipt. */
+const travelWithoutTimers = (ms: number) => {
+  jest.setSystemTime(Date.now() + ms)
+}
+
+const renderSuccess = () => {
+  render(
+    <ContextForScreen>
+      <Success />
+    </ContextForScreen>,
+  )
+  screen.getByTestId("Success Text")
+}
+
+describe("SendBitcoinCompletedScreen", () => {
+  let LL: ReturnType<typeof i18nObject>
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockIsFocused.mockReturnValue(true)
+    loadLocale("en")
+    LL = i18nObject("en")
+    screenshotState.isTakingScreenshot = false
+    mockUseActiveWallet.mockReturnValue(custodialActiveWallet)
+    mockSettingsScreenQuery.mockReturnValue({ data: { me: { username: "test1" } } })
+  })
+
+  afterEach(() => {
+    jest.clearAllTimers()
+  })
+
+  it("renders the Success state correctly", async () => {
+    render(
+      <ContextForScreen>
+        <Success />
+      </ContextForScreen>,
+    )
+
+    const successTextElement = await waitFor(() => screen.findByTestId("Success Text"))
+    expect(within(successTextElement).getByTestId("SUCCESS")).toBeTruthy()
+  })
+
+  it("renders the Queued state correctly", async () => {
+    render(
+      <ContextForScreen>
+        <Queued />
+      </ContextForScreen>,
+    )
+
+    const queuedTextElement = await waitFor(() => screen.findByTestId("Success Text"))
+    expect(within(queuedTextElement).getByTestId("QUEUED")).toBeTruthy()
+  })
+
+  it("renders the Pending state correctly", async () => {
+    render(
+      <ContextForScreen>
+        <Pending />
+      </ContextForScreen>,
+    )
+
+    const pendingTextElement = await waitFor(() => screen.findByTestId("Success Text"))
+    expect(within(pendingTextElement).getByTestId("PENDING")).toBeTruthy()
+  })
+
+  it("tints the Pending icon with the warning token", async () => {
+    render(
+      <ContextForScreen>
+        <Pending />
+      </ContextForScreen>,
+    )
+
+    const icon = await screen.findByTestId("icon-warning")
+    expect(icon.props.color).toBe(light.warning)
+    expect(icon.props.color).not.toBe(light.staticBrandOrange)
+  })
+
+  it("render successAction - LUD 09 - message", async () => {
+    const lud09MessageRoute = {
+      key: "sendBitcoinCompleted",
+      name: "sendBitcoinCompleted",
+      params: {
+        status: "SUCCESS",
+        successAction: {
+          tag: "message",
+          description: "",
+          url: null,
+          message: "Thanks for your support.",
+          ciphertext: null,
+          iv: null,
+          decipher: () => null,
+        },
+        currencyAmount: "$0.03",
+        satAmount: "25 SAT",
+        currencyFeeAmount: "$0.00",
+        satFeeAmount: "0 SAT",
+        destination: "moises",
+        paymentType: "lightning",
+        createdAt: 1747691078,
+      },
+    } as const
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={lud09MessageRoute} />
+      </ContextForScreen>,
+    )
+
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    expect(screen.getByText(lud09MessageRoute.params.successAction.message)).toBeTruthy()
+    expect(screen.getByText(lud09MessageRoute.params.currencyAmount)).toBeTruthy()
+    expect(screen.getByText(lud09MessageRoute.params.currencyFeeAmount)).toBeTruthy()
+    expect(screen.getByText(lud09MessageRoute.params.paymentType)).toBeTruthy()
+    expect(screen.getByText(lud09MessageRoute.params.destination)).toBeTruthy()
+    expect(screen.getByText(LL.common.share())).toBeTruthy()
+  })
+
+  it("render successAction - LUD 09 - URL", async () => {
+    const lud09URLRoute = {
+      key: "sendBitcoinCompleted",
+      name: "sendBitcoinCompleted",
+      params: {
+        status: "SUCCESS",
+        successAction: {
+          tag: "url",
+          description: null,
+          url: "https://es.blink.sv",
+          message: null,
+          ciphertext: null,
+          iv: null,
+          decipher: () => null,
+        },
+        currencyAmount: "$0.03",
+        satAmount: "25 SAT",
+        currencyFeeAmount: "$0.00",
+        satFeeAmount: "0 SAT",
+        destination: "moises",
+        paymentType: "lightning",
+        createdAt: 1747691078,
+      },
+    } as const
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={lud09URLRoute} />
+      </ContextForScreen>,
+    )
+
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    const button = await waitFor(() =>
+      screen.findByTestId(LL.ScanningQRCodeScreen.openLinkTitle()),
+    )
+    expect(button).toBeTruthy()
+    fireEvent.press(button)
+    expect(Linking.openURL).toHaveBeenCalledWith(lud09URLRoute.params.successAction.url)
+
+    expect(screen.getByText(lud09URLRoute.params.successAction.url)).toBeTruthy()
+    expect(screen.getByText(lud09URLRoute.params.currencyAmount)).toBeTruthy()
+    expect(screen.getByText(lud09URLRoute.params.currencyFeeAmount)).toBeTruthy()
+    expect(screen.getByText(lud09URLRoute.params.paymentType)).toBeTruthy()
+    expect(screen.getByText(lud09URLRoute.params.destination)).toBeTruthy()
+    expect(screen.getByText(LL.common.share())).toBeTruthy()
+  })
+
+  it("render successAction - LUD 09 - URL with description", async () => {
+    const lud09URLWithDescRoute = {
+      key: "sendBitcoinCompleted",
+      name: "sendBitcoinCompleted",
+      params: {
+        status: "SUCCESS",
+        successAction: {
+          tag: "url",
+          description: "Example URL + description",
+          url: "https://es.blink.sv",
+          message: null,
+          ciphertext: null,
+          iv: null,
+          decipher: () => null,
+        },
+        currencyAmount: "$0.03",
+        satAmount: "25 SAT",
+        currencyFeeAmount: "$0.00",
+        satFeeAmount: "0 SAT",
+        destination: "moises",
+        paymentType: "lightning",
+        createdAt: 1747691078,
+      },
+    } as const
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={lud09URLWithDescRoute} />
+      </ContextForScreen>,
+    )
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+    const button = await waitFor(() =>
+      screen.findByTestId(LL.ScanningQRCodeScreen.openLinkTitle()),
+    )
+    expect(button).toBeTruthy()
+    fireEvent.press(button)
+    expect(Linking.openURL).toHaveBeenCalledWith(
+      lud09URLWithDescRoute.params.successAction.url,
+    )
+
+    expect(
+      screen.getByText(lud09URLWithDescRoute.params.successAction.description, {
+        exact: false,
+      }),
+    ).toBeTruthy()
+    expect(screen.getByText(lud09URLWithDescRoute.params.successAction.url)).toBeTruthy()
+    expect(screen.getByText(lud09URLWithDescRoute.params.currencyAmount)).toBeTruthy()
+    expect(screen.getByText(lud09URLWithDescRoute.params.currencyFeeAmount)).toBeTruthy()
+    expect(screen.getByText(lud09URLWithDescRoute.params.paymentType)).toBeTruthy()
+    expect(screen.getByText(lud09URLWithDescRoute.params.destination)).toBeTruthy()
+    expect(screen.getByText(LL.common.share())).toBeTruthy()
+  })
+
+  it("render successAction - LUD 10 - message", async () => {
+    const encryptedMessage = "131313"
+    const lud10AESRoute = {
+      key: "sendBitcoinCompleted",
+      name: "sendBitcoinCompleted",
+      params: {
+        status: "SUCCESS",
+        successAction: {
+          tag: "aes",
+          description: "Here is your redeem code",
+          url: null,
+          message: null,
+          ciphertext: "564u3BEMRefWUV1098gJ5w==",
+          iv: "IhkC5ktKB9LG91FvlbN2kg==",
+          decipher: () => null,
+        },
+        preimage: "25004cd52960a3bac983e3f95c432341a7052cef37b9253b0b0b1256d754559b",
+        currencyAmount: "$0.03",
+        satAmount: "25 SAT",
+        currencyFeeAmount: "$0.00",
+        satFeeAmount: "0 SAT",
+        destination: "moises",
+        paymentType: "lightning",
+        createdAt: 1747691078,
+      },
+    } as const
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={lud10AESRoute} />
+      </ContextForScreen>,
+    )
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    expect(
+      screen.getByText(
+        `${lud10AESRoute.params.successAction.description} ${encryptedMessage}`,
+      ),
+    ).toBeTruthy()
+    expect(screen.getByText(lud10AESRoute.params.currencyAmount)).toBeTruthy()
+    expect(screen.getByText(lud10AESRoute.params.currencyFeeAmount)).toBeTruthy()
+    expect(screen.getByText(lud10AESRoute.params.paymentType)).toBeTruthy()
+    expect(screen.getByText(lud10AESRoute.params.destination)).toBeTruthy()
+    expect(screen.getByText(LL.common.share())).toBeTruthy()
+  })
+
+  it("renders self-custodial AES plaintext from `message` (no ciphertext/iv)", async () => {
+    const plaintext = "redeem-code-XYZ"
+    const description = "Here is your AES secret"
+    const selfCustodialAesRoute = {
+      key: "sendBitcoinCompleted",
+      name: "sendBitcoinCompleted",
+      params: {
+        status: "SUCCESS",
+        successAction: {
+          tag: "aes",
+          message: plaintext,
+          description,
+          url: null,
+          ciphertext: null,
+          iv: null,
+          decipher: () => null,
+        },
+        preimage: undefined,
+        currencyAmount: "$0.03",
+        satAmount: "25 SAT",
+        currencyFeeAmount: "$0.00",
+        satFeeAmount: "0 SAT",
+        destination: "alice@blink.sv",
+        paymentType: "lightning",
+        createdAt: 1747691078,
+      },
+    } as const
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={selfCustodialAesRoute} />
+      </ContextForScreen>,
+    )
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    expect(screen.getByText(`${plaintext} ${description}`)).toBeTruthy()
+  })
+
+  it("renders the sender's note for a regular payment with no success action", async () => {
+    const note = "Dinner split with Alice"
+    const regularPaymentRoute = {
+      key: "sendBitcoinCompleted",
+      name: "sendBitcoinCompleted",
+      params: {
+        status: "SUCCESS",
+        note,
+        currencyAmount: "$0.03",
+        satAmount: "25 SAT",
+        currencyFeeAmount: "$0.00",
+        satFeeAmount: "0 SAT",
+        destination: "alice",
+        paymentType: "intraledger",
+        createdAt: 1747691078,
+      },
+    } as const
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={regularPaymentRoute} />
+      </ContextForScreen>,
+    )
+
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    expect(screen.getByText(LL.SendBitcoinScreen.noteLabel())).toBeTruthy()
+    expect(screen.getByText(note)).toBeTruthy()
+  })
+
+  it("prefers the success action over the sender's note when both are present", async () => {
+    const note = "Private memo to self"
+    const successMessage = "Thanks for your support."
+    const bothRoute = {
+      key: "sendBitcoinCompleted",
+      name: "sendBitcoinCompleted",
+      params: {
+        status: "SUCCESS",
+        successAction: {
+          tag: "message",
+          description: "",
+          url: null,
+          message: successMessage,
+          ciphertext: null,
+          iv: null,
+          decipher: () => null,
+        },
+        note,
+        currencyAmount: "$0.03",
+        satAmount: "25 SAT",
+        currencyFeeAmount: "$0.00",
+        satFeeAmount: "0 SAT",
+        destination: "moises",
+        paymentType: "lnurl",
+        createdAt: 1747691078,
+      },
+    } as const
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={bothRoute} />
+      </ContextForScreen>,
+    )
+
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    expect(screen.getByText(successMessage)).toBeTruthy()
+    expect(screen.queryByText(note)).toBeNull()
+  })
+
+  it("hides the Note when there is neither a note nor a success action", async () => {
+    const noNoteRoute = {
+      key: "sendBitcoinCompleted",
+      name: "sendBitcoinCompleted",
+      params: {
+        status: "SUCCESS",
+        currencyAmount: "$0.03",
+        satAmount: "25 SAT",
+        currencyFeeAmount: "$0.00",
+        satFeeAmount: "0 SAT",
+        destination: "bob",
+        paymentType: "onchain",
+        createdAt: 1747691078,
+      },
+    } as const
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={noNoteRoute} />
+      </ContextForScreen>,
+    )
+
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    expect(screen.queryByText(LL.SendBitcoinScreen.noteLabel())).toBeNull()
+  })
+
+  it("treats a whitespace-only note as empty and hides the Note", async () => {
+    const whitespaceNoteRoute = {
+      key: "sendBitcoinCompleted",
+      name: "sendBitcoinCompleted",
+      params: {
+        status: "SUCCESS",
+        note: "   ",
+        currencyAmount: "$0.03",
+        satAmount: "25 SAT",
+        currencyFeeAmount: "$0.00",
+        satFeeAmount: "0 SAT",
+        destination: "carol",
+        paymentType: "intraledger",
+        createdAt: 1747691078,
+      },
+    } as const
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={whitespaceNoteRoute} />
+      </ContextForScreen>,
+    )
+
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    expect(screen.queryByText(LL.SendBitcoinScreen.noteLabel())).toBeNull()
+  })
+
+  describe("transaction time", () => {
+    it("renders the time as a wall-clock date", () => {
+      render(
+        <ContextForScreen>
+          <SuccessAction route={timedRoute} />
+        </ContextForScreen>,
+      )
+
+      act(() => {
+        jest.advanceTimersByTime(2300)
+      })
+
+      expect(screen.getByText(LL.SendBitcoinScreen.time())).toBeTruthy()
+      expect(screen.getByText(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)).toBeTruthy()
+    })
+
+    it("hides the time row when the payment carries no timestamp", () => {
+      const untimedRoute = {
+        ...timedRoute,
+        params: { ...timedRoute.params, createdAt: undefined },
+      } as const
+
+      render(
+        <ContextForScreen>
+          <SuccessAction route={untimedRoute} />
+        </ContextForScreen>,
+      )
+
+      act(() => {
+        jest.advanceTimersByTime(2300)
+      })
+
+      expect(screen.queryByText(LL.SendBitcoinScreen.time())).toBeNull()
+    })
+  })
+
+  describe("payment type", () => {
+    it("hides the type row when the payment carries no type", () => {
+      const untypedRoute = {
+        ...timedRoute,
+        params: { ...timedRoute.params, paymentType: undefined },
+      } as const
+
+      render(
+        <ContextForScreen>
+          <SuccessAction route={untypedRoute} />
+        </ContextForScreen>,
+      )
+
+      act(() => {
+        jest.advanceTimersByTime(2300)
+      })
+
+      expect(screen.queryByText(LL.SendBitcoinScreen.type())).toBeNull()
+    })
+  })
+
+  describe("receipt actions", () => {
+    it("goes back to the home stack from the close button", () => {
+      render(
+        <ContextForScreen>
+          <SuccessAction route={timedRoute} />
+        </ContextForScreen>,
+      )
+
+      act(() => {
+        jest.advanceTimersByTime(2300)
+      })
+
+      fireEvent.press(screen.getByTestId("close"))
+
+      expect(mockPopToTop).toHaveBeenCalledTimes(1)
+    })
+
+    it("shares the receipt from the share button", () => {
+      render(
+        <ContextForScreen>
+          <SuccessAction route={timedRoute} />
+        </ContextForScreen>,
+      )
+
+      act(() => {
+        jest.advanceTimersByTime(2300)
+      })
+
+      fireEvent.press(screen.getByText(LL.common.share()))
+
+      expect(mockCaptureAndShare).toHaveBeenCalled()
+    })
+
+    it("drops the close button out of the capture while sharing", () => {
+      screenshotState.isTakingScreenshot = true
+
+      render(
+        <ContextForScreen>
+          <SuccessAction route={timedRoute} />
+        </ContextForScreen>,
+      )
+
+      act(() => {
+        jest.advanceTimersByTime(2300)
+      })
+
+      expect(screen.queryByTestId("close")).toBeNull()
+    })
+  })
+
+  describe("dismiss after a stale background trip", () => {
+    beforeEach(() => {
+      mockAppStateCurrentState = "active"
+      mockAppStateListeners.length = 0
+      mockFocusListeners.length = 0
+    })
+
+    it("dismisses to home when returning from a stale background trip", () => {
+      renderSuccess()
+
+      triggerAppStateChange("background")
+      advanceTime(STALE_TRIP_MS)
+      expect(mockPopToTop).not.toHaveBeenCalled()
+
+      triggerAppStateChange("active")
+
+      expect(mockPopToTop).toHaveBeenCalledTimes(1)
+      expect(mockNavigate).not.toHaveBeenCalled()
+    })
+
+    it("dismisses when the stale trip started through the iOS inactive state", () => {
+      renderSuccess()
+
+      triggerAppStateChange("inactive")
+      triggerAppStateChange("background")
+      advanceTime(STALE_TRIP_MS)
+      triggerAppStateChange("active")
+
+      expect(mockPopToTop).toHaveBeenCalledTimes(1)
+    })
+
+    it("keeps the receipt on a quick background trip", () => {
+      renderSuccess()
+
+      triggerAppStateChange("background")
+      advanceTime(QUICK_TRIP_MS)
+      triggerAppStateChange("active")
+
+      expect(mockPopToTop).not.toHaveBeenCalled()
+    })
+
+    it("dismisses on a stale trip that follows a quick one", () => {
+      /** The quick return clears the recorded departure, and a departure it failed to clear
+       *  would measure the second trip from the first one and dismiss for the wrong reason. */
+      renderSuccess()
+
+      triggerAppStateChange("background")
+      advanceTime(QUICK_TRIP_MS)
+      triggerAppStateChange("active")
+      expect(mockPopToTop).not.toHaveBeenCalled()
+
+      triggerAppStateChange("background")
+      advanceTime(STALE_TRIP_MS)
+      triggerAppStateChange("active")
+
+      expect(mockPopToTop).toHaveBeenCalledTimes(1)
+    })
+
+    it("dismisses on a stale return taken during the success icon phase", () => {
+      /** The hook is live behind the icon too, so a trip taken before the receipt is drawn
+       *  has to land on Home rather than finish the animation onto a stale receipt. */
+      renderSuccess()
+
+      triggerAppStateChange("background")
+      travelWithoutTimers(STALE_TRIP_MS)
+      triggerAppStateChange("active")
+
+      expect(screen.getByTestId("Success Text")).toBeTruthy()
+      expect(mockPopToTop).toHaveBeenCalledTimes(1)
+    })
+
+    it("does not dismiss while the app stays in the foreground", () => {
+      renderSuccess()
+
+      triggerAppStateChange("inactive")
+      advanceTime(STALE_TRIP_MS)
+      triggerAppStateChange("active")
+
+      expect(mockPopToTop).not.toHaveBeenCalled()
+    })
+
+    it("does not dismiss while the screen is covered by another screen", () => {
+      renderSuccess()
+      mockIsFocused.mockReturnValue(false)
+
+      triggerAppStateChange("background")
+      advanceTime(STALE_TRIP_MS)
+      triggerAppStateChange("active")
+
+      expect(mockPopToTop).not.toHaveBeenCalled()
+    })
+
+    it("dismisses a covered receipt once the screen over it goes away", () => {
+      /** Skipping the dismissal outright would strand the receipt for the rest of the
+       *  session, which is the case this screen exists to avoid. */
+      renderSuccess()
+      mockIsFocused.mockReturnValue(false)
+
+      triggerAppStateChange("background")
+      advanceTime(STALE_TRIP_MS)
+      triggerAppStateChange("active")
+
+      mockIsFocused.mockReturnValue(true)
+      triggerFocus()
+
+      expect(mockPopToTop).toHaveBeenCalledTimes(1)
+    })
+
+    it("spends the held dismissal on the first focus only", () => {
+      renderSuccess()
+      mockIsFocused.mockReturnValue(false)
+
+      triggerAppStateChange("background")
+      advanceTime(STALE_TRIP_MS)
+      triggerAppStateChange("active")
+
+      mockIsFocused.mockReturnValue(true)
+      triggerFocus()
+      triggerFocus()
+
+      expect(mockPopToTop).toHaveBeenCalledTimes(1)
+    })
+
+    it("stays put when the screen regains focus with no stale trip behind it", () => {
+      renderSuccess()
+
+      triggerFocus()
+
+      expect(mockPopToTop).not.toHaveBeenCalled()
+    })
+
+    it("does not dismiss when mounted while the app was already backgrounded", () => {
+      /** The screen never reads AppState.currentState, so what carries this case is the
+       *  absence of a preceding "background" event rather than the state set here. */
+      mockAppStateCurrentState = "background"
+      renderSuccess()
+
+      advanceTime(STALE_TRIP_MS)
+      triggerAppStateChange("active")
+
+      expect(mockPopToTop).not.toHaveBeenCalled()
+    })
+
+    it("pops from inside the app state event, before the resume lock can cover it", () => {
+      /** Ordering contract with AppStateWrapper: its relock awaits the keystore, so this
+       *  listener runs first and still finds the receipt focused. Were the pop deferred to
+       *  a later tick, the unlock screen would already be over it and the dismissal would
+       *  be held back to a focus that only arrives once the user has unlocked. */
+      renderSuccess()
+
+      triggerAppStateChange("background")
+      advanceTime(STALE_TRIP_MS)
+      mockAppStateListeners[0]("active")
+
+      expect(mockPopToTop).toHaveBeenCalledTimes(1)
+    })
+
+    it("removes its listeners on unmount", () => {
+      renderSuccess()
+      expect(mockAppStateListeners).toHaveLength(1)
+      expect(mockFocusListeners).toHaveLength(1)
+
+      screen.unmount()
+
+      expect(mockAppStateListeners).toHaveLength(0)
+      expect(mockFocusListeners).toHaveLength(0)
+    })
+  })
+
+  describe("ViewShot background color for screenshot", () => {
+    it("has white background in light mode for screenshot capture", async () => {
+      render(
+        <ContextForScreenWithTheme mode="light">
+          <SuccessAction route={timedRoute} />
+        </ContextForScreenWithTheme>,
+      )
+
+      act(() => {
+        jest.advanceTimersByTime(2300)
+      })
+
+      const viewShot = await waitFor(() => screen.findByTestId("view-shot"))
+      expect(viewShot.props.style).toMatchObject({
+        backgroundColor: light.backgroundDefault,
+      })
+    })
+
+    it("has dark background in dark mode for screenshot capture", async () => {
+      render(
+        <ContextForScreenWithTheme mode="dark">
+          <SuccessAction route={timedRoute} />
+        </ContextForScreenWithTheme>,
+      )
+
+      act(() => {
+        jest.advanceTimersByTime(2300)
+      })
+
+      const viewShot = await waitFor(() => screen.findByTestId("view-shot"))
+      expect(viewShot.props.style).toMatchObject({
+        backgroundColor: dark.backgroundDefault,
+      })
+    })
+  })
+})
+
+describe("SendBitcoinCompletedScreen sender row", () => {
+  let LL: ReturnType<typeof i18nObject>
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockIsFocused.mockReturnValue(true)
+    loadLocale("en")
+    LL = i18nObject("en")
+    mockUseActiveWallet.mockReturnValue(custodialActiveWallet)
+    mockSettingsScreenQuery.mockReturnValue({ data: { me: { username: "test1" } } })
+  })
+
+  afterEach(() => {
+    jest.clearAllTimers()
+  })
+
+  it("skips the settings query and shows no Sender row for a self-custodial wallet", () => {
+    // `isSelfCustodial` is false while the self-custodial SDK is loading, which is
+    // exactly when the custodial `me` query must stay skipped.
+    mockUseActiveWallet.mockReturnValue({
+      isSelfCustodial: false,
+      accountType: AccountType.SelfCustodial,
+    })
+    mockSettingsScreenQuery.mockReturnValue({ data: undefined })
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={timedRoute} />
+      </ContextForScreen>,
+    )
+
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    expect(mockSettingsScreenQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ skip: true }),
+    )
+    expect(screen.queryByText(LL.SendBitcoinScreen.sender())).toBeNull()
+    expect(screen.queryByText(LL.common.walletUser())).toBeNull()
+  })
+
+  it("runs the settings query and shows the username for a custodial wallet", () => {
+    render(
+      <ContextForScreen>
+        <SuccessAction route={timedRoute} />
+      </ContextForScreen>,
+    )
+
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    expect(mockSettingsScreenQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ skip: false }),
+    )
+    expect(screen.getByText(LL.SendBitcoinScreen.sender())).toBeTruthy()
+    expect(screen.getByText("test1")).toBeTruthy()
+  })
+
+  it("falls back to the My wallet label for a custodial wallet with no username", () => {
+    mockSettingsScreenQuery.mockReturnValue({ data: undefined })
+
+    render(
+      <ContextForScreen>
+        <SuccessAction route={timedRoute} />
+      </ContextForScreen>,
+    )
+
+    act(() => {
+      jest.advanceTimersByTime(2300)
+    })
+
+    expect(screen.getByText(LL.SendBitcoinScreen.sender())).toBeTruthy()
+    expect(screen.getByText(LL.common.walletUser())).toBeTruthy()
+  })
+})

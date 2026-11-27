@@ -1,0 +1,295 @@
+import React, { useState } from "react"
+import { Alert, TextInput, View } from "react-native"
+import { MAX_FONT_SIZE_MULTIPLIER } from "@app/rne-theme/text-scaling"
+import Modal from "react-native-modal"
+
+import { gql } from "@apollo/client"
+import { radius } from "@app/rne-theme/radius"
+import { GaloyIconButton } from "@app/components/atomic/galoy-icon-button"
+import { GaloyPrimaryButton } from "@app/components/atomic/galoy-primary-button"
+import { GaloySecondaryButton } from "@app/components/atomic/galoy-secondary-button"
+import { CONTACT_EMAIL_ADDRESS } from "@app/config"
+import { useAccountDeleteMutation, useSettingsScreenQuery } from "@app/graphql/generated"
+import { getBtcWallet, getUsdWallet } from "@app/graphql/wallets-utils"
+import { useDisplayCurrency } from "@app/hooks/use-display-currency"
+import { useAppConfig } from "@app/hooks"
+import useLogout from "@app/hooks/use-logout"
+import { useLogoutAndRoute } from "@app/hooks/use-logout-and-route"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { toBtcMoneyAmount, toUsdMoneyAmount } from "@app/types/amounts"
+import { useTheme, Text, makeStyles } from "@rn-vui/themed"
+
+import {
+  SwitchProfileOutcome,
+  useSwitchToNextProfile,
+} from "@app/hooks/use-switch-to-next-profile"
+import { fonts } from "@app/rne-theme/fonts"
+
+import { SettingsButton } from "../../button"
+import { useAccountDeleteContext } from "../account-delete-context"
+
+/** The migration flow closes the emptied custodial account with this same mutation, and
+ *  codegen allows one document per operation name, so this one is shared: `code` is what
+ *  lets that caller tell a transient refusal from a terminal one. */
+gql`
+  mutation accountDelete {
+    accountDelete {
+      errors {
+        message
+        code
+      }
+      success
+    }
+  }
+`
+
+export const Delete = () => {
+  const styles = useStyles()
+
+  const { logout } = useLogout()
+  const { routeAfterLogout } = useLogoutAndRoute()
+  const { appConfig } = useAppConfig()
+  const { switchToNextProfile } = useSwitchToNextProfile()
+
+  const { LL } = useI18nContext()
+
+  const [text, setText] = useState("")
+  const [modalVisible, setModalVisible] = useState(false)
+  const closeModal = () => {
+    setModalVisible(false)
+    setText("")
+  }
+
+  const {
+    theme: { colors },
+  } = useTheme()
+
+  const { setAccountIsBeingDeleted, leaveWhileDeleting } = useAccountDeleteContext()
+
+  const [deleteAccount] = useAccountDeleteMutation({ fetchPolicy: "no-cache" })
+
+  const { data, loading } = useSettingsScreenQuery()
+  const { formatMoneyAmount } = useDisplayCurrency()
+
+  const btcWallet = getBtcWallet(data?.me?.defaultAccount?.wallets)
+  const usdWallet = getUsdWallet(data?.me?.defaultAccount?.wallets)
+
+  const usdWalletBalance = toUsdMoneyAmount(usdWallet?.balance)
+  const btcWalletBalance = toBtcMoneyAmount(btcWallet?.balance)
+
+  let usdBalanceWarning = ""
+  let btcBalanceWarning = ""
+  let balancePositive = false
+  if (usdWalletBalance.amount > 0) {
+    const balance =
+      formatMoneyAmount && formatMoneyAmount({ moneyAmount: usdWalletBalance })
+    usdBalanceWarning = LL.AccountScreen.usdBalanceWarning({ balance })
+    balancePositive = true
+  }
+
+  if (btcWalletBalance.amount > 0) {
+    const balance =
+      formatMoneyAmount && formatMoneyAmount({ moneyAmount: btcWalletBalance })
+    btcBalanceWarning = LL.AccountScreen.btcBalanceWarning({ balance })
+    balancePositive = true
+  }
+
+  const fullMessage = (
+    usdBalanceWarning +
+    "\n" +
+    btcBalanceWarning +
+    "\n" +
+    LL.support.deleteAccountBalanceWarning()
+  ).trim()
+
+  const deleteAccountAction = async () => {
+    if (balancePositive) {
+      Alert.alert(LL.common.warning(), fullMessage, [
+        { text: LL.common.cancel(), onPress: () => {} },
+        {
+          text: LL.common.yes(),
+          onPress: async () => setModalVisible(true),
+        },
+      ])
+    } else {
+      setModalVisible(true)
+    }
+  }
+
+  /** The lock takes every way off this screen away while it runs; a deletion that did not
+   *  happen has to give them back, or the user is left on a dead screen with no exit. */
+  const releaseDeletionLock = () => setAccountIsBeingDeleted(false)
+
+  const deleteUserAccount = async () => {
+    try {
+      const accountToDeleteToken = appConfig.token
+
+      setAccountIsBeingDeleted(true)
+
+      const res = await deleteAccount()
+
+      if (res.data?.accountDelete?.success) {
+        /** The lock stays up from here on: the account is gone, and the screen under the
+         *  cover is about to render for whichever session comes next. It is left only
+         *  through the lock, by the switch or by the farewell's OK, and never given back. */
+        const outcome = await switchToNextProfile(
+          accountToDeleteToken,
+          leaveWhileDeleting,
+        )
+        const hasSwitched = outcome === SwitchProfileOutcome.Switched
+        /** Kept until a logout says otherwise: no logout ran means no lock was dropped,
+         *  and the switched path leaves the session it moved to in front of it. */
+        let isAppLockKeptByLogout = true
+        if (!hasSwitched) {
+          // The logout erases every saved session, which is only correct once
+          // we know there is none left. An unreadable store is ignorance, not
+          // that knowledge, so keep the list and sign out of everything else.
+          // Known cost: the same failed read left the deleted account in that
+          // list, so it can still be offered and will 401 once. Cheaper than
+          // erasing sessions that were only invisible.
+          const isStoreUnreadable = outcome === SwitchProfileOutcome.ProfilesUnreadable
+          const { isAppLockKept } = await logout({
+            stateToDefault: true,
+            preserveStoredCredentials: isStoreUnreadable,
+          })
+          /** Carried to the dialog rather than acted on here: the way out is taken when
+           *  the farewell is acknowledged, and a lock kept over a wallet the device still
+           *  stores is owed an answer before the landing screen offers it again. */
+          isAppLockKeptByLogout = isAppLockKept
+        }
+
+        Alert.alert(LL.support.bye(), LL.support.deleteAccountConfirmation(), [
+          {
+            text: LL.common.ok(),
+            onPress: () => {
+              if (!hasSwitched) {
+                leaveWhileDeleting(() => routeAfterLogout(isAppLockKeptByLogout))
+              }
+            },
+          },
+        ])
+      } else {
+        /** The server can answer with neither a success nor a rejection, which reading the
+         *  first error unguarded turns into a TypeError: the generic alert then replaces the
+         *  reason and the hidden back button never comes back. */
+        const rejectionMessage = res.data?.accountDelete?.errors?.[0]?.message
+        const deleteErrorMessage = LL.support.deleteAccountError({
+          email: CONTACT_EMAIL_ADDRESS,
+        })
+
+        releaseDeletionLock()
+        Alert.alert(
+          LL.common.error(),
+          rejectionMessage
+            ? `${deleteErrorMessage}\n\n${rejectionMessage}`
+            : deleteErrorMessage,
+        )
+      }
+    } catch (err) {
+      console.error(err)
+      releaseDeletionLock()
+      Alert.alert(
+        LL.common.error(),
+        LL.support.deleteAccountError({ email: CONTACT_EMAIL_ADDRESS }),
+      )
+    }
+  }
+
+  const userWroteDelete =
+    text.toLowerCase().trim() === LL.support.delete().toLocaleLowerCase().trim()
+
+  const AccountDeletionModal = (
+    <Modal
+      isVisible={modalVisible}
+      onBackdropPress={closeModal}
+      backdropOpacity={0.8}
+      backdropColor={colors.backgroundDefault}
+      avoidKeyboard={true}
+    >
+      <View style={styles.view}>
+        <View style={styles.actionButtons}>
+          <Text type="h1" bold>
+            {LL.support.deleteAccount()}
+          </Text>
+          <GaloyIconButton name="close" onPress={closeModal} size={"medium"} />
+        </View>
+        <Text type="p1">{LL.support.typeDelete({ delete: LL.support.delete() })}</Text>
+        <TextInput
+          maxFontSizeMultiplier={MAX_FONT_SIZE_MULTIPLIER}
+          autoCapitalize="none"
+          style={styles.textInput}
+          onChangeText={setText}
+          value={text}
+          placeholder={LL.support.delete()}
+          placeholderTextColor={colors.textDisabled}
+        />
+        <View style={styles.modalButtons} testID="delete-modal-buttons">
+          <GaloyPrimaryButton
+            title={LL.common.confirm()}
+            disabled={!userWroteDelete}
+            onPress={() => {
+              closeModal()
+              Alert.alert(
+                LL.support.finalConfirmationAccountDeletionTitle(),
+                LL.support.finalConfirmationAccountDeletionMessage(),
+                [
+                  { text: LL.common.cancel(), onPress: () => {} },
+                  { text: LL.common.ok(), onPress: () => deleteUserAccount() },
+                ],
+              )
+            }}
+          />
+          <GaloySecondaryButton title={LL.common.cancel()} onPress={closeModal} />
+        </View>
+      </View>
+    </Modal>
+  )
+
+  return (
+    <>
+      <SettingsButton
+        loading={loading}
+        title={LL.support.deleteAccount()}
+        variant="critical"
+        onPress={deleteAccountAction}
+      />
+      <Text type="p2" bold style={styles.warningText}>
+        {LL.support.deleteAccountWarning()}
+      </Text>
+      {AccountDeletionModal}
+    </>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  view: {
+    marginHorizontal: 20,
+    backgroundColor: colors.surfaceInteractive,
+    padding: 20,
+    borderRadius: radius.popup,
+    display: "flex",
+    flexDirection: "column",
+    rowGap: 20,
+  },
+  textInput: {
+    fontFamily: fonts.regular,
+    fontSize: 16,
+    backgroundColor: colors.neutral,
+    padding: 12,
+    color: colors.textOnBackground,
+    borderRadius: radius.default,
+  },
+  actionButtons: {
+    display: "flex",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  modalButtons: {
+    flexDirection: "column",
+    rowGap: 12,
+  },
+  warningText: {
+    color: colors.accent,
+  },
+}))

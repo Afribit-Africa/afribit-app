@@ -1,0 +1,398 @@
+import { NavigatorScreenParams } from "@react-navigation/native"
+import { LNURLPaySuccessAction } from "lnurl-pay"
+
+import { PhoneCodeChannelType, UserContact, WalletCurrency } from "@app/graphql/generated"
+import { PhoneLoginInitiateType } from "@app/screens/phone-auth-screen/phone-login-initiate-type"
+import {
+  PaymentDestination,
+  MerchantChoice,
+  ReceiveDestination,
+} from "@app/screens/send-bitcoin-screen/payment-destination/index.types"
+import { PaymentDetail } from "@app/screens/send-bitcoin-screen/payment-details/index.types"
+import { PaymentSendCompletedStatus } from "@app/screens/send-bitcoin-screen/use-send-payment"
+import { DrainConversionReturn } from "@app/screens/conversion-flow/drain-conversion"
+import { AccountMode, AccountTypeMode, CreationBlockReason } from "@app/types/account"
+import { DisplayCurrency, MoneyAmount, WalletOrDisplayCurrency } from "@app/types/amounts"
+import { WalletDescriptor } from "@app/types/wallets"
+import {
+  LoginMethodAdditionParams,
+  TotpCodeCheckParams,
+  TwoFactorFlowParams,
+} from "@app/types/two-factor-enforcement"
+import { MigrationSupportOrigin, MigrationSupportReason } from "@app/types/migration"
+import type { HandoffPrefill } from "./handoff-prefill"
+
+import { AuthenticationScreenPurpose, PinScreenPurpose } from "../utils/enum"
+
+export const PhraseStep = { First: 1, Second: 2 } as const
+export type PhraseStep = (typeof PhraseStep)[keyof typeof PhraseStep]
+
+/** Deep links and navigation-state rehydration can deliver params the route type says are
+ *  impossible; the phrase screens use this to fall back instead of throwing. */
+export const isPhraseStep = (value: unknown): value is PhraseStep =>
+  value === PhraseStep.First || value === PhraseStep.Second
+
+export const ChooseExperienceContinueRoute = {
+  AcceptTerms: "acceptTermsAndConditions",
+  BackupSuccess: "selfCustodialBackupSuccess",
+  BalancesOverview: "accountMigrationBalancesOverview",
+} as const
+export type ChooseExperienceContinueRoute =
+  (typeof ChooseExperienceContinueRoute)[keyof typeof ChooseExperienceContinueRoute]
+
+export const ChooseExperienceEntry = {
+  Settings: "settings",
+} as const
+export type ChooseExperienceEntry =
+  (typeof ChooseExperienceEntry)[keyof typeof ChooseExperienceEntry]
+
+/** The onward step the onboarding entries carry. Derived off the route params so the two
+ *  cannot drift, and null on the settings entry, which has no onward step at all. */
+export type ChooseExperienceContinue = Extract<
+  RootStackParamList["selfCustodialChooseExperience"],
+  { onContinue: unknown }
+>["onContinue"]
+
+/** Whether the mode screen can offer a way back. Creation arrives from the account type
+ *  screen with nothing provisioned yet, and settings opens it over a live session, so both
+ *  have somewhere coherent to return to. Restore and migration arrive after the account is
+ *  already activated, and only the screen ahead resets to Primary: going back there strands
+ *  a live account on an onboarding screen. */
+export const canGoBackFromChooseExperience = (
+  onContinue: ChooseExperienceContinue | null,
+): boolean => {
+  if (!onContinue) return true
+
+  return onContinue.route === ChooseExperienceContinueRoute.AcceptTerms
+}
+
+const BACKWARD_ACTIONS = ["GO_BACK", "POP"]
+
+/** Whether a removal is one the user's own back press dispatched: the header arrow and
+ *  the Android hardware back raise GO_BACK, the swipe raises POP. A screen that holds
+ *  the user refuses only these. A removal the app dispatches on its own, a reset for a
+ *  logout or a gate, or a navigation for a profile switch, has to keep working, and
+ *  blocking those is how a hold meant to protect the user ends up trapping them. */
+export const isBackwardAction = (action: { type: string }): boolean =>
+  BACKWARD_ACTIONS.includes(action.type)
+
+export type RootStackParamList = {
+  getStarted: undefined
+  accountTypeSelection: { mode: AccountTypeMode }
+  unsupportedRegion: { reason?: CreationBlockReason } | undefined
+  selfCustodialWalletCreation: { mode?: AccountMode } | undefined
+  liteDeviceAccount: {
+    appCheckToken: string
+  }
+  // Dev-only route: root-navigator registers it only when __DEV__ (lazy
+  // require there). navigate("developerScreen") still type-checks in release
+  // builds but is dropped as an unhandled action — gate any new call site
+  // with __DEV__, or reuse useSecretMenuTrigger.
+  developerScreen: undefined
+  login: {
+    type: PhoneLoginInitiateType
+    title?: string
+    onboarding?: boolean
+  }
+  /** `isResume` marks the lock raised on returning from background: unlocking pops back to
+   *  the screen the user was on, instead of resetting to Primary the way a cold start does. */
+  authenticationCheck: { isResume?: boolean } | undefined
+  authentication: {
+    screenPurpose: AuthenticationScreenPurpose
+    isPinEnabled: boolean
+    isResume?: boolean
+  }
+  pin: {
+    screenPurpose: PinScreenPurpose
+    isResume?: boolean
+    /** SetPin only: the PIN is compulsory (W-D11). The screen offers no way back and,
+     *  once the PIN is stored, finishes the unlock and opens the home screen. */
+    isRequired?: boolean
+    /** ChallengePin only. Function params are non-serializable (the same accepted
+     *  trade-off as selectionScreen.onSelect) and are dropped on state rehydration,
+     *  so both stay optional and every call is optional-chained. */
+    onChallengeSuccess?: () => void
+    onChallengeFailure?: () => void
+  }
+  Primary: NavigatorScreenParams<PrimaryStackParamList> | undefined
+  scanningQRCode: undefined
+  settings: undefined
+  addressScreen: undefined
+  defaultWallet: undefined
+  theme: undefined
+  sendBitcoinDestination?: {
+    payment?: string
+    username?: string
+    scanPressed?: number
+    /** The wallet to pay from, when the caller already judged which one can, so the
+     *  details step does not fall back to a default that cannot. Navigation-only: a
+     *  wallet the flow does not offer is ignored. */
+    sendingWalletId?: string
+  }
+  sendBitcoinDetails: {
+    paymentDestination: PaymentDestination
+    /** Handed on from the destination step; see it there. */
+    sendingWalletId?: string
+    /** A shell hand-off's amount and note (handoff-prefill.ts). Navigation-only: this
+     *  route is not deep-linkable, so a link cannot fill them in. */
+    prefill?: HandoffPrefill
+  }
+  merchantSelection: {
+    merchants: MerchantChoice[]
+  }
+  sendBitcoinConfirmation: {
+    paymentDetail: PaymentDetail<WalletCurrency>
+  }
+  conversionDetails: undefined
+  conversionConfirmation: {
+    fromWalletCurrency: WalletCurrency
+    moneyAmount: MoneyAmount<WalletOrDisplayCurrency>
+    /** Where a completed drain convert lands (back in its flow, not Home). Navigation-only,
+     *  never a privilege: the region waiver comes from the armed flag, not this forgeable param. */
+    drainConversion?: DrainConversionReturn | null
+  }
+  conversionSuccess:
+    | {
+        /** Set when the conversion drained a balance for a flow, so the success screen
+         *  returns there instead of Home. */
+        returnTo?: DrainConversionReturn
+      }
+    | undefined
+  sendBitcoinCompleted: {
+    arrivalAtMempoolEstimate?: number
+    status: PaymentSendCompletedStatus
+    successAction?: LNURLPaySuccessAction
+    preimage?: string
+    note?: string
+    currencyAmount?: string
+    satAmount?: string
+    currencyFeeAmount?: string
+    satFeeAmount?: string
+    destination?: string
+    paymentType?: string
+    createdAt?: number
+  }
+  setLightningAddress: { onboarding?: boolean }
+  language: undefined
+  currency: undefined
+  security: {
+    mIsBiometricsEnabled: boolean
+    mIsPinEnabled: boolean
+  }
+  lnurl: { username: string }
+  receiveBitcoin: undefined
+  redeemBitcoinDetail: {
+    receiveDestination: ReceiveDestination
+  }
+  redeemBitcoinResult: {
+    callback: string
+    domain: string
+    k1: string
+    defaultDescription: string
+    minWithdrawableSatoshis: MoneyAmount<typeof WalletCurrency.Btc>
+    maxWithdrawableSatoshis: MoneyAmount<typeof WalletCurrency.Btc>
+    receivingWalletDescriptor?: WalletDescriptor<typeof WalletCurrency.Btc>
+    unitOfAccountAmount: MoneyAmount<WalletOrDisplayCurrency>
+    settlementAmount: MoneyAmount<typeof WalletCurrency.Btc>
+    displayAmount: MoneyAmount<DisplayCurrency>
+  }
+  phoneFlow: NavigatorScreenParams<PhoneValidationStackParamList>
+  phoneRegistrationInitiate: undefined
+  phoneRegistrationValidate: { phone: string; channel: PhoneCodeChannelType }
+  transactionDetail: { txid: string; recipientUserId?: string }
+  unclaimedDepositsScreen: undefined
+  transactionHistory?: {
+    wallets?: ReadonlyArray<{
+      readonly id: string
+      readonly walletCurrency: WalletCurrency
+    }>
+    currencyFilter?: WalletCurrency
+    showLoading?: boolean
+  }
+  accountScreen: undefined
+  profileScreen: undefined
+  notificationSettingsScreen: undefined
+  apiScreen: undefined
+  apiKeyCreateScreen: undefined
+  transactionLimitsScreen: undefined
+  feeRatesScreen: undefined
+  acceptTermsAndConditions: NewAccountFlowParamsList
+  emailRegistrationInitiate?: {
+    onboarding?: boolean
+    hasUsername?: boolean
+  }
+  emailRegistrationValidate: {
+    email: string
+    emailRegistrationId: string
+    onboarding?: boolean
+    hasUsername?: boolean
+  }
+  emailLoginInitiate: undefined
+  emailLoginValidate: { email: string; emailLoginId: string }
+  /** The authenticator onboarding: why, then which app, then the setup key. Opened by
+   *  every prompt's Set authenticator. */
+  totpRegistrationIntro: TwoFactorFlowParams | undefined
+  totpRegistrationApps: undefined
+  /** Opened from the settings, the setup key screen offers the onboarding as a
+   *  secondary action for a user new to authenticator apps; reached through the
+   *  onboarding, it does not offer it again. */
+  totpRegistrationInitiate: { offersOnboarding?: boolean } | undefined
+  /** The setup key travels on to the backup, the only screens that ever show it, and
+   *  goes with them once the flow is left. Neither route is deep-linkable, so the key
+   *  cannot arrive from outside the app (asserted over DEEP_LINK_SCREENS). */
+  totpRegistrationValidate: {
+    totpRegistrationId: string
+    secret: string
+  } & TotpCodeCheckParams
+  /** The user id names the account in the backup for an account with no username yet. */
+  totpRegistrationBackup: { secret: string; userId: string }
+  totpRegistrationDone: undefined
+  /** The authenticator's code, which turns it off. */
+  totpDeleteValidate: undefined
+  /** The authenticator's code for adding a login method. */
+  loginMethodCode: LoginMethodAdditionParams
+  totpLoginValidate: { authToken: string }
+  twoFactorSetup: TwoFactorFlowParams | undefined
+  twoFactorNonCustodial: TwoFactorFlowParams | undefined
+  webView: {
+    url: string
+    initialTitle?: string
+    headerTitle?: string
+    /**
+     * DEV ONLY — bypasses the instance-origin allowlist of the WebView screen.
+     * Must only be set from the developer screen; the webView route is not
+     * deep-linkable, so the param cannot arrive from outside the app. That
+     * invariant is enforced by a test over DEEP_LINK_SCREENS in
+     * navigation-container-wrapper — adding a deep link for this route would
+     * make the bypass reachable from a crafted URL.
+     */
+    allowArbitraryUrl?: boolean
+  }
+  fullOnboardingFlow: undefined
+  notificationHistory: undefined
+  onboarding: NavigatorScreenParams<OnboardingStackParamList>
+  selectionScreen: {
+    title: string
+    options: Array<{ value: string; label: string }>
+    selectedValue: string
+    onSelect: (value: string) => void
+  }
+  selfCustodialBackupMethod: undefined
+  selfCustodialCloudBackup: undefined
+  selfCustodialBackupSecurityChecks: undefined
+  selfCustodialBackupPhrase: { step: PhraseStep }
+  selfCustodialViewBackupSecurityChecks: undefined
+  selfCustodialViewBackupPhrase: undefined
+  selfCustodialBackupPhraseConfirm: {
+    challenges: Array<{ index: number; word: string }>
+    successMessage?: string
+  }
+  selfCustodialBackupBundleExport: undefined
+  selfCustodialBackupSuccess: { reBackup?: boolean; message?: string } | undefined
+  /** The settings entry applies the choice to the active account and returns. The
+   *  onboarding entries declare their onward step: restore and migration pass the
+   *  account id (mode stored now); creation has none yet, so the mode rides to wallet
+   *  creation instead. */
+  selfCustodialChooseExperience:
+    | {
+        entry: typeof ChooseExperienceEntry.Settings
+        /** Set when returning from the drain conversion, so the switch resumes preselected. */
+        initialMode?: AccountMode
+      }
+    | {
+        onContinue:
+          | { route: typeof ChooseExperienceContinueRoute.AcceptTerms }
+          | {
+              route: typeof ChooseExperienceContinueRoute.BackupSuccess
+              accountId: string
+            }
+          | {
+              route: typeof ChooseExperienceContinueRoute.BalancesOverview
+              accountId: string
+            }
+      }
+  selfCustodialModeSwitchSuccess: { mode: AccountMode }
+  accountMigrationEntry: undefined
+  accountMigrationStart: undefined
+  accountMigrationExplainer: undefined
+  accountMigrationKeepReceiving: undefined
+  accountMigrationMerchantTools: undefined
+  accountMigrationDownloadHistory: undefined
+  accountMigrationBalancesOverview:
+    | {
+        /** The transfer screen sent the user back: the server refused the commit for a
+         *  deposit still confirming. */
+        isDepositRefused?: true
+      }
+    | undefined
+  accountMigrationTransferringFunds:
+    | {
+        /** Approve opened the screen, right after its own check found no deposit. */
+        isDepositChecked?: true
+      }
+    | undefined
+  accountMigrationContactSupport: {
+    reason: MigrationSupportReason
+    origin?: MigrationSupportOrigin
+    /** Named by a handover raised after the session was discarded, when the live `me` query
+     *  can no longer answer for the custodial account the ticket is about. */
+    custodialAccountId?: string
+  }
+  selfCustodialRestorePhrase: { step: PhraseStep; words?: string[] }
+  selfCustodialRestoreMethod: undefined
+  selfCustodialCloudRestore: undefined
+  selfCustodialOperatorUnreachable: undefined
+  stableBalanceSettings: undefined
+}
+
+export type OnboardingStackParamList = {
+  welcomeLevel1: { onboarding?: boolean }
+  emailBenefits: { onboarding?: boolean; hasUsername?: boolean }
+  lightningBenefits: { onboarding?: boolean; canGoBack?: boolean }
+  supportScreen?: { canGoBack?: boolean }
+}
+
+export type PeopleStackParamList = {
+  peopleHome: undefined
+  contactDetail: { contact: UserContact }
+  allContacts: undefined
+}
+
+export type PhoneValidationStackParamList = {
+  Primary: undefined
+  phoneLoginInitiate: {
+    type: PhoneLoginInitiateType
+    channel: PhoneCodeChannelType
+    title?: string
+    onboarding?: boolean
+  }
+  telegramLoginValidate: {
+    phone: string
+    type: PhoneLoginInitiateType
+    onboarding?: boolean
+  }
+  phoneLoginValidate: {
+    phone: string
+    channel: PhoneCodeChannelType
+    type: PhoneLoginInitiateType
+    onboarding?: boolean
+  }
+  authentication: {
+    screenPurpose: AuthenticationScreenPurpose
+  }
+  Home: undefined
+  totpLoginValidate: { authToken: string }
+}
+
+export type PrimaryStackParamList = {
+  Home: undefined
+  People: undefined
+  Web: undefined
+}
+
+export type NewAccountFlowParamsList = {
+  flow: "phone" | "trial" | "selfCustodial" | "selfCustodialRestore" | "migration"
+  /** The self-custodial region mode chosen before terms, carried through to wallet
+   *  creation, which stores it against the account it provisions. */
+  mode?: AccountMode
+}

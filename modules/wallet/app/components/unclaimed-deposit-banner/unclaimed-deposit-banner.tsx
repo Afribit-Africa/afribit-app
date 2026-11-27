@@ -1,0 +1,97 @@
+import React, { useMemo } from "react"
+import { Pressable, View } from "react-native"
+
+import { useNavigation } from "@react-navigation/native"
+import { NativeStackNavigationProp } from "@react-navigation/native-stack"
+import { makeStyles, Text, useTheme } from "@rn-vui/themed"
+
+import { radius } from "@app/rne-theme/radius"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { RootStackParamList } from "@app/navigation/stack-param-lists"
+import { DepositStatus, type PendingDeposit } from "@app/types/payment"
+import { testProps } from "@app/utils/testProps"
+import { fonts } from "@app/rne-theme/fonts"
+
+import { GaloyIcon } from "../atomic/galoy-icon"
+
+type Props = {
+  deposits: readonly PendingDeposit[]
+}
+
+/**
+ * The screen owns the deposit fetch (usePendingDeposits) and feeds both this
+ * banner and the balance header's pending pill, so the two can never disagree
+ * about the same deposits.
+ */
+export const UnclaimedDepositBanner: React.FC<Props> = ({ deposits }) => {
+  const styles = useStyles()
+  const {
+    theme: { colors },
+  } = useTheme()
+  const { LL } = useI18nContext()
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>()
+
+  const { count, totalSats } = useMemo(() => {
+    // Only actionable deposits belong in this banner: Immature and Claiming
+    // ones are the balance header pill's job until they land, and Refunded ones
+    // are already resolved. The remaining statuses (Claimable, FeeExceeded,
+    // Error) all carry an action on the unclaimed-deposits screen.
+    const actionable = deposits.filter(
+      ({ status }) =>
+        status !== DepositStatus.Immature &&
+        status !== DepositStatus.Claiming &&
+        status !== DepositStatus.Refunded,
+    )
+    return {
+      count: actionable.length,
+      totalSats: actionable.reduce((sum, { amount }) => sum + amount.amount, 0),
+    }
+  }, [deposits])
+
+  if (count === 0) return null
+
+  return (
+    <Pressable
+      style={styles.container}
+      onPress={() => navigation.navigate("unclaimedDepositsScreen")}
+      {...testProps("unclaimed-deposit-banner")}
+    >
+      <View style={styles.content}>
+        <GaloyIcon name="receive" size={20} />
+        <View style={styles.textContainer}>
+          <Text style={styles.title}>{LL.UnclaimedDeposit.title({ count })}</Text>
+          <Text style={styles.description}>
+            {LL.UnclaimedDeposit.description({ sats: totalSats })}
+          </Text>
+        </View>
+        <GaloyIcon name="caret-right" size={20} color={colors.accent} />
+      </View>
+    </Pressable>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  container: {
+    backgroundColor: colors.surfaceInteractive,
+    borderRadius: radius.default,
+    padding: 14,
+  },
+  content: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  textContainer: {
+    flex: 1,
+    gap: 4,
+  },
+  title: {
+    fontSize: 14,
+    fontFamily: fonts.bold,
+    color: colors.textOnBackground,
+  },
+  description: {
+    fontSize: 12,
+    color: colors.textMuted,
+  },
+}))

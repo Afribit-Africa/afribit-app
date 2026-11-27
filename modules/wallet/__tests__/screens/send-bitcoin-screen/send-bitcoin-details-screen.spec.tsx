@@ -1,0 +1,459 @@
+import React from "react"
+
+import { act, render, screen } from "@testing-library/react-native"
+import { ThemeProvider } from "@rn-vui/themed"
+import { SafeAreaProvider } from "react-native-safe-area-context"
+
+import { GaloyPrimaryButton } from "@app/components/atomic/galoy-primary-button"
+import theme from "@app/rne-theme/theme"
+import { createNoAmountLightningPaymentDetails } from "@app/screens/send-bitcoin-screen/payment-details"
+import SendBitcoinDetailsScreen from "@app/screens/send-bitcoin-screen/send-bitcoin-details-screen"
+import {
+  toBtcMoneyAmount,
+  toDisplayAmount,
+  type MoneyAmount,
+  type WalletOrDisplayCurrency,
+} from "@app/types/amounts"
+import { SATS_DISPLAY_CURRENCY } from "@app/types/price"
+import {
+  createPriceConverters,
+  priceOfCurrencyInCurrencyFromRates,
+  satsOnlyPriceOfCurrencyInCurrency,
+} from "@app/utils/price-conversion"
+
+const mockSendWallets = jest.fn()
+const mockCreatePaymentDetail = jest.fn()
+
+const BTC_WALLET = { id: "btc-1", walletCurrency: "BTC", balance: 100000 }
+const USD_WALLET = { id: "usd-1", walletCurrency: "USD", balance: 5000 }
+
+/** The wallet list the hook reports before the region has answered: the dollar wallet is
+ *  still in it, and still the default, because nothing has withdrawn it yet. */
+const PENDING_WALLETS = {
+  wallets: [BTC_WALLET, USD_WALLET],
+  defaultWallet: USD_WALLET,
+  btcWallet: BTC_WALLET,
+  usdWallet: USD_WALLET,
+  network: "mainnet",
+  isSelfCustodial: true,
+  loading: true,
+}
+
+/** The same account once the verdict lands restricted: the dollar wallet is gone and the
+ *  default has fallen back to bitcoin. */
+const RESTRICTED_WALLETS = {
+  ...PENDING_WALLETS,
+  wallets: [BTC_WALLET],
+  defaultWallet: BTC_WALLET,
+  usdWallet: undefined,
+  loading: false,
+}
+
+jest.mock("@app/screens/send-bitcoin-screen/hooks/use-send-wallets", () => ({
+  useSendWallets: () => mockSendWallets(),
+}))
+
+/** Every hook value below is built once, not per render. Handing back a fresh function or
+ *  array each time changes the identities the screen's effects depend on, which re-renders
+ *  it forever and exhausts the worker rather than failing an assertion. */
+const CONVERT_MONEY_AMOUNT = jest.fn((amount: unknown) => amount)
+const PRICE_CONVERSION: { convertMoneyAmount: unknown; displayCurrency: string } = {
+  convertMoneyAmount: CONVERT_MONEY_AMOUNT,
+  displayCurrency: "USD",
+}
+
+jest.mock("@app/hooks/use-price-conversion", () => ({
+  usePriceConversion: () => PRICE_CONVERSION,
+}))
+
+const DISPLAY_CURRENCY = {
+  formatMoneyAmount: () => "$0.00",
+  zeroDisplayAmount: toDisplayAmount({ amount: 0, currencyCode: "USD" }),
+  fractionDigits: 2,
+}
+
+jest.mock("@app/hooks/use-display-currency", () => ({
+  useDisplayCurrency: () => DISPLAY_CURRENCY,
+}))
+
+const LEVEL = { currentLevel: "ONE" }
+
+jest.mock("@app/graphql/level-context", () => ({
+  useLevel: () => LEVEL,
+}))
+
+const HIDE_AMOUNT = { hideAmount: false }
+
+jest.mock("@app/graphql/hide-amount-context", () => ({
+  useHideAmount: () => HIDE_AMOUNT,
+}))
+
+jest.mock("@app/graphql/is-authed-context", () => ({
+  useIsAuthed: () => true,
+}))
+
+const EMPTY_QUERY = { data: undefined }
+
+jest.mock("@app/graphql/generated", () => ({
+  WalletCurrency: { Btc: "BTC", Usd: "USD" },
+  useSendBitcoinWithdrawalLimitsQuery: () => EMPTY_QUERY,
+  useSendBitcoinInternalLimitsQuery: () => EMPTY_QUERY,
+}))
+
+const FEE_TIER_OPTIONS = {
+  feeTier: null,
+  setFeeTier: jest.fn(),
+  feeTierOptions: [],
+  feeTierErrorMessage: undefined,
+  isFeeTierErrorBlocking: false,
+  isQuotingFees: false,
+  isOnchain: false,
+  selectedTierFee: undefined,
+  hasFeeQuote: false,
+}
+
+jest.mock("@app/screens/send-bitcoin-screen/hooks/use-onchain-fee-tier-options", () => ({
+  useOnchainFeeTierOptions: () => FEE_TIER_OPTIONS,
+}))
+
+const NAVIGATION = { navigate: jest.fn(), setOptions: jest.fn() }
+
+jest.mock("@react-navigation/native", () => ({
+  useNavigation: () => NAVIGATION,
+  useFocusEffect: jest.fn(),
+  useIsFocused: () => true,
+}))
+
+const CLIPBOARD = { copyToClipboard: jest.fn() }
+
+jest.mock("@app/hooks/use-clipboard", () => ({
+  useClipboard: () => CLIPBOARD,
+}))
+
+const PERSISTENT_STATE = {
+  persistentState: { galoyInstance: { id: "Main" } },
+  updateState: jest.fn(),
+}
+
+jest.mock("@app/store/persistent-state", () => ({
+  usePersistentStateContext: () => PERSISTENT_STATE,
+}))
+
+const PILL_WIDTH = { widthStyle: {}, onPillLayout: jest.fn() }
+
+jest.mock("@app/components/atomic/currency-pill/use-equal-pill-width", () => ({
+  useEqualPillWidth: () => PILL_WIDTH,
+}))
+
+/** The resolved screen renders the whole send form. None of it is what this file asserts,
+ *  and rendering it for real is heavy enough to exhaust the worker, so the presentational
+ *  pieces stand in as nothing. */
+type AmountInputProps = {
+  unitOfAccountAmount: MoneyAmount<WalletOrDisplayCurrency>
+  setAmount: (amount: MoneyAmount<WalletOrDisplayCurrency>) => void
+}
+const mockAmountInput = jest.fn((_props: AmountInputProps) => null)
+jest.mock("@app/components/amount-input/amount-input", () => ({
+  AmountInput: (props: AmountInputProps) => mockAmountInput(props),
+}))
+jest.mock("@app/components/note-input", () => ({ NoteInput: () => null }))
+jest.mock("@app/components/payment-destination-display", () => ({
+  PaymentDestinationDisplay: () => null,
+}))
+jest.mock("@app/screens/send-bitcoin-screen/confirm-fees-modal", () => ({
+  ConfirmFeesModal: () => null,
+}))
+jest.mock("@app/screens/send-bitcoin-screen/send-bitcoin-details-extra-info", () => ({
+  SendBitcoinDetailsExtraInfo: () => null,
+}))
+
+jest.mock("@app/components/screen", () => {
+  const ReactActual = jest.requireActual("react")
+  const { View } = jest.requireActual("react-native")
+  return {
+    Screen: ({ children }: { children?: React.ReactNode }) =>
+      ReactActual.createElement(View, { testID: "screen" }, children),
+  }
+})
+
+/** Every key is both callable and further nestable, so the screen reaches any depth of copy
+ *  without this file mirroring the translation tree. One self-referential proxy rather than a
+ *  fresh one per access: handing back a new object each time lets an introspecting caller
+ *  allocate forever. */
+const LL_STUB: unknown = new Proxy(() => "", { get: () => LL_STUB })
+const I18N = { LL: LL_STUB }
+
+jest.mock("@app/i18n/i18n-react", () => ({
+  useI18nContext: () => I18N,
+}))
+
+const PENDING_TEST_ID = "send-wallet-list-pending"
+
+const route = {
+  params: {
+    paymentDestination: { createPaymentDetail: mockCreatePaymentDetail },
+  },
+} as never
+
+/** The same route, with the caller naming the wallet it judged able to pay. */
+const routeAskingFor = (sendingWalletId: string) =>
+  ({
+    params: {
+      paymentDestination: { createPaymentDetail: mockCreatePaymentDetail },
+      sendingWalletId,
+    },
+  }) as never
+
+/** The amount sheet reads safe-area insets, so the tree needs a provider with real metrics
+ *  rather than the live measurement a test cannot take. */
+const SCREEN_FRAME = { x: 0, y: 0, width: 390, height: 844 }
+const INSETS = { top: 47, left: 0, right: 0, bottom: 34 }
+
+const Wrapper = ({ children }: { children: React.ReactNode }) => (
+  <SafeAreaProvider initialMetrics={{ frame: SCREEN_FRAME, insets: INSETS }}>
+    <ThemeProvider theme={theme}>{children}</ThemeProvider>
+  </SafeAreaProvider>
+)
+
+const renderScreen = () =>
+  render(
+    <Wrapper>
+      <SendBitcoinDetailsScreen route={route} />
+    </Wrapper>,
+  )
+
+describe("SendBitcoinDetailsScreen with a shell hand-off's amount and note", () => {
+  const minimal = {
+    canSetAmount: false,
+    paymentType: "lightning",
+    sendingWalletDescriptor: { id: BTC_WALLET.id, currency: "BTC" },
+    convertMoneyAmount: jest.fn(),
+    setConvertMoneyAmount: jest.fn(),
+  }
+  const settable = {
+    ...minimal,
+    canSetAmount: true,
+    canSetMemo: true,
+    setAmount: jest.fn(),
+    setMemo: jest.fn(),
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    settable.setAmount.mockReturnValue(settable)
+    settable.setMemo.mockReturnValue(minimal)
+    mockCreatePaymentDetail.mockReturnValue(settable)
+    mockSendWallets.mockReturnValue(RESTRICTED_WALLETS)
+  })
+
+  const renderWithPrefill = (prefill: unknown) =>
+    render(
+      <Wrapper>
+        <SendBitcoinDetailsScreen
+          route={
+            {
+              params: {
+                paymentDestination: { createPaymentDetail: mockCreatePaymentDetail },
+                prefill,
+              },
+            } as never
+          }
+        />
+      </Wrapper>,
+    )
+
+  it("starts at the hand-off's amount and note", () => {
+    renderWithPrefill({ amount: { currency: "BTC", value: 2100 }, note: "Lunch" })
+
+    expect(settable.setAmount).toHaveBeenLastCalledWith(
+      expect.objectContaining({ amount: 2100, currency: "BTC" }),
+    )
+    expect(settable.setMemo).toHaveBeenCalledWith("Lunch")
+  })
+
+  it("starts at zero when the hand-off's amount cannot be shown without a conversion", () => {
+    renderWithPrefill({ amount: { currency: "KES", value: 50 } })
+
+    expect(settable.setAmount).toHaveBeenCalledTimes(1)
+    expect(settable.setAmount).toHaveBeenCalledWith(DISPLAY_CURRENCY.zeroDisplayAmount)
+    expect(settable.setMemo).not.toHaveBeenCalled()
+  })
+})
+
+describe("SendBitcoinDetailsScreen region gate", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockCreatePaymentDetail.mockReturnValue({
+      canSetAmount: false,
+      paymentType: "lightning",
+      sendingWalletDescriptor: { id: BTC_WALLET.id, currency: "BTC" },
+      convertMoneyAmount: jest.fn(),
+      setConvertMoneyAmount: jest.fn(),
+    })
+    mockSendWallets.mockReturnValue(RESTRICTED_WALLETS)
+  })
+
+  /**
+   * The screen chooses its sending wallet once and never revisits it, so choosing before the
+   * region has answered is what left a restricted user sending from the dollar wallet the
+   * verdict had just withdrawn.
+   */
+  it("does not choose a sending wallet while the region is still resolving", () => {
+    mockSendWallets.mockReturnValue(PENDING_WALLETS)
+
+    renderScreen()
+
+    expect(mockCreatePaymentDetail).not.toHaveBeenCalled()
+  })
+
+  /** Holding is not blanking: the wait has to be visible, or the user stares at an empty
+   *  screen for as long as the country takes. */
+  it("shows a loader while the region is still resolving", () => {
+    mockSendWallets.mockReturnValue(PENDING_WALLETS)
+
+    const { getByTestId } = renderScreen()
+
+    expect(getByTestId(PENDING_TEST_ID)).toBeTruthy()
+  })
+
+  it("chooses the sending wallet once the region resolves", () => {
+    renderScreen()
+
+    expect(mockCreatePaymentDetail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sendingWalletDescriptor: { id: BTC_WALLET.id, currency: "BTC" },
+      }),
+    )
+  })
+
+  /** The whole point of the hold: the wallet the screen commits to is the one that survived
+   *  the verdict, not the one that was on offer before it. */
+  it("never seeds from the dollar wallet the restriction withdrew", () => {
+    mockSendWallets.mockReturnValue(PENDING_WALLETS)
+    const { rerender } = renderScreen()
+
+    mockSendWallets.mockReturnValue(RESTRICTED_WALLETS)
+    rerender(
+      <Wrapper>
+        <SendBitcoinDetailsScreen route={route} />
+      </Wrapper>,
+    )
+
+    expect(mockCreatePaymentDetail).toHaveBeenCalledTimes(1)
+    expect(mockCreatePaymentDetail).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        sendingWalletDescriptor: { id: USD_WALLET.id, currency: "USD" },
+      }),
+    )
+  })
+
+  /** A caller that judged which wallet can pay names it, and the screen seeds from that
+   *  one rather than from the flow's default, as long as the flow still offers it. */
+  it("seeds from the wallet the caller asked for when the flow offers it", () => {
+    mockSendWallets.mockReturnValue({ ...PENDING_WALLETS, loading: false })
+    const requested = routeAskingFor(BTC_WALLET.id)
+
+    render(
+      <Wrapper>
+        <SendBitcoinDetailsScreen route={requested} />
+      </Wrapper>,
+    )
+
+    expect(mockCreatePaymentDetail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sendingWalletDescriptor: { id: BTC_WALLET.id, currency: "BTC" },
+      }),
+    )
+  })
+
+  /** A wallet the flow no longer offers, the dollar wallet a restriction withdrew, is not
+   *  brought back by naming it: the default stands. */
+  it("falls back to the default when the wallet asked for is not offered", () => {
+    const requested = routeAskingFor(USD_WALLET.id)
+
+    render(
+      <Wrapper>
+        <SendBitcoinDetailsScreen route={requested} />
+      </Wrapper>,
+    )
+
+    expect(mockCreatePaymentDetail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sendingWalletDescriptor: { id: BTC_WALLET.id, currency: "BTC" },
+      }),
+    )
+  })
+
+  it("stops showing the loader once the region resolves", () => {
+    const { queryByTestId } = renderScreen()
+
+    expect(queryByTestId(PENDING_TEST_ID)).toBeNull()
+  })
+})
+
+describe("SendBitcoinDetailsScreen when a rate arrives after an amount was typed in sats", () => {
+  /** One BTC is 100,000 USD here, so a sat is a tenth of a US cent. */
+  const satsOnly = createPriceConverters(
+    satsOnlyPriceOfCurrencyInCurrency,
+    SATS_DISPLAY_CURRENCY,
+  ).convertMoneyAmount
+  const inUsd = createPriceConverters(
+    priceOfCurrencyInCurrencyFromRates(0.1, 1) ?? satsOnlyPriceOfCurrencyInCurrency,
+    "USD",
+  ).convertMoneyAmount
+
+  const lastAmountInput = (): AmountInputProps => {
+    const { calls } = mockAmountInput.mock
+    return calls[calls.length - 1][0]
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockSendWallets.mockReturnValue(RESTRICTED_WALLETS)
+    mockCreatePaymentDetail.mockImplementation(
+      ({ convertMoneyAmount, sendingWalletDescriptor }) =>
+        createNoAmountLightningPaymentDetails({
+          paymentRequest: "lnbc1noamount",
+          unitOfAccountAmount: toBtcMoneyAmount(0),
+          convertMoneyAmount,
+          sendingWalletDescriptor,
+        }),
+    )
+    PRICE_CONVERSION.convertMoneyAmount = satsOnly
+    PRICE_CONVERSION.displayCurrency = SATS_DISPLAY_CURRENCY
+    DISPLAY_CURRENCY.zeroDisplayAmount = toDisplayAmount({
+      amount: 0,
+      currencyCode: SATS_DISPLAY_CURRENCY,
+    })
+  })
+
+  afterEach(() => {
+    PRICE_CONVERSION.convertMoneyAmount = CONVERT_MONEY_AMOUNT
+    PRICE_CONVERSION.displayCurrency = "USD"
+    DISPLAY_CURRENCY.zeroDisplayAmount = toDisplayAmount({
+      amount: 0,
+      currencyCode: "USD",
+    })
+  })
+
+  it("keeps the amount, what it settles to, and the way forward", () => {
+    const { rerender } = renderScreen()
+    act(() => {
+      lastAmountInput().setAmount(
+        toDisplayAmount({ amount: 1000, currencyCode: SATS_DISPLAY_CURRENCY }),
+      )
+    })
+    expect(screen.UNSAFE_getByType(GaloyPrimaryButton).props.disabled).toBe(false)
+
+    PRICE_CONVERSION.convertMoneyAmount = inUsd
+    PRICE_CONVERSION.displayCurrency = "USD"
+    rerender(
+      <Wrapper>
+        <SendBitcoinDetailsScreen route={route} />
+      </Wrapper>,
+    )
+
+    expect(lastAmountInput().unitOfAccountAmount).toEqual(toBtcMoneyAmount(1000))
+    expect(screen.UNSAFE_getByType(GaloyPrimaryButton).props.disabled).toBe(false)
+  })
+})

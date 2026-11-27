@@ -1,0 +1,219 @@
+import { useCallback } from "react"
+
+import { gql } from "@apollo/client"
+import { CACHE_OWNER_KEY, SCHEMA_VERSION_KEY } from "@app/config"
+import { useUserLogoutMutation } from "@app/graphql/generated"
+import { usePersistentStateContext } from "@app/store/persistent-state"
+import { logLogout } from "@app/utils/analytics"
+import { reportError } from "@app/utils/error-logging"
+import {
+  readStoredWalletPresence,
+  StoredWalletPresence,
+} from "@app/self-custodial/storage/account-index"
+import AsyncStorage from "@react-native-async-storage/async-storage"
+import messaging from "@react-native-firebase/messaging"
+
+import KeyStoreWrapper from "../utils/storage/secureStorage"
+
+type LogoutOptions = {
+  stateToDefault?: boolean
+  token?: string
+  isValidToken?: boolean
+  /**
+   * Signs out of the active session and leaves everything the device has
+   * stored alone: the saved profiles, the PIN, the biometrics flag and the
+   * cache markers. For the one case where "there is nothing left" is not
+   * knowledge but ignorance — the keystore could not be read, so erasing would
+   * delete sessions we never saw.
+   *
+   * The group cannot be split. Profiles without the PIN would leave live
+   * bearer tokens behind with the lock that guarded them gone, and dropping
+   * the cache markers (schema version and owner) makes the next client build
+   * purge the persisted query cache, which is erasing all the same.
+   *
+   * Only the untokened path reads this; a call that passes a token is already
+   * scoped to that one session and destroys nothing else.
+   */
+  preserveStoredCredentials?: boolean
+}
+
+type LogoutResult = {
+  /**
+   * Whether the app lock is still set once the logout is done. A caller that
+   * leaves a lock screen behind has to know: a lock that was kept is still owed
+   * an answer, and one that went is not there to ask for it.
+   */
+  readonly isAppLockKept: boolean
+}
+
+/**
+ * Whether the app lock still has something on this device to guard once the
+ * session is gone.
+ *
+ * A self-custodial wallet is stored on the device and outlives every logout:
+ * nothing here erases it, and the account switcher opens it again for whoever
+ * is holding the phone. Erasing it is not a logout's call either: the app does
+ * not delete a wallet that still holds funds, and a logout cannot tell whether
+ * this one does. The lock is the only thing between that person and the
+ * wallet, so it stays for as long as one is stored. With none stored it goes,
+ * as it always did: a lock with nothing behind it only locks its owner out.
+ *
+ * Fails closed: an index that cannot be read is not an index with no wallets. The opposite
+ * bias belongs to the sessionless cold start, which lands on the landing screen when it
+ * cannot tell; both read through the same shared presence call so neither drifts.
+ */
+const isAppLockStillOwed = async (): Promise<boolean> => {
+  const presence = await readStoredWalletPresence()
+  return presence !== StoredWalletPresence.Absent
+}
+
+/** What the app lock guards, each answered fail-closed by the store that holds it. */
+export type AppLockGuardedState = {
+  readonly hasNoStoredWallet: boolean
+  readonly hasNoSavedSession: boolean
+  readonly hasNoActiveToken: boolean
+}
+
+/**
+ * The one rule for when the app lock may go: once nothing it guards is left on the device.
+ * Each caller brings the evidence it has, a logout what its own erasures reported and a
+ * delete what it reads back of the stores it did not erase, but the rule is this one.
+ */
+export const canDropAppLock = ({
+  hasNoStoredWallet,
+  hasNoSavedSession,
+  hasNoActiveToken,
+}: AppLockGuardedState): boolean =>
+  hasNoStoredWallet && hasNoSavedSession && hasNoActiveToken
+
+gql`
+  mutation userLogout($input: UserLogoutInput!) {
+    userLogout(input: $input) {
+      success
+    }
+  }
+`
+
+const useLogout = () => {
+  const { resetState, clearToken } = usePersistentStateContext()
+  const [userLogoutMutation] = useUserLogoutMutation({
+    fetchPolicy: "no-cache",
+  })
+
+  const logout = useCallback(
+    async ({
+      stateToDefault = true,
+      token,
+      isValidToken = true,
+      preserveStoredCredentials = false,
+    }: LogoutOptions = {}): Promise<LogoutResult> => {
+      /** Kept until its slots are seen to go: a teardown that threw part-way
+       *  says nothing about them, and a caller told the lock went would walk a
+       *  lock screen away from a lock that may still be set. */
+      let isAppLockKept = true
+
+      try {
+        // Isolated: a failed push-token fetch must never skip the local
+        // key-store cleanup below. The server-side revocation is best-effort
+        // and simply skipped without a device token.
+        let deviceToken: string | undefined
+        try {
+          deviceToken = await messaging().getToken()
+        } catch (err) {
+          reportError("logout device token fetch", err)
+        }
+
+        let context: { headers: { authorization: string } } | undefined
+        if (token) {
+          await KeyStoreWrapper.removeSessionProfileByToken(token)
+          // Removing the profile that backs the active session must also drop
+          // the keychain token: a crash before the caller saves the next
+          // token would otherwise resurrect a session whose profile is gone.
+          // Via the provider, so its dirty-check ref learns the slot is empty —
+          // a direct keystore removal would leave the ref stale and make every
+          // later save skip the write it thinks already happened.
+          const activeToken = await KeyStoreWrapper.getActiveToken()
+          if (activeToken === token) {
+            await clearToken()
+          }
+          context = { headers: { authorization: `Bearer ${token}` } }
+        } else {
+          /** Keeping the stored credentials whole keeps the lock with them, and
+           *  sessions that were not erased are sessions still stored. */
+          let isLockOwed = true
+          let areSavedSessionsErased = false
+
+          if (!preserveStoredCredentials) {
+            /** Asked before anything is erased, so that nothing sits between
+             *  the erasures below for a kill to land on. */
+            isLockOwed = await isAppLockStillOwed()
+            await AsyncStorage.multiRemove([SCHEMA_VERSION_KEY, CACHE_OWNER_KEY])
+            areSavedSessionsErased = await KeyStoreWrapper.removeSessionProfiles()
+          }
+          const isActiveTokenErased = await clearToken()
+
+          /** The lock goes last, and only once what it guards is provably
+           *  gone. The erasures above report a failure rather than throwing
+           *  one, and a lock dropped over sessions that are still stored would
+           *  leave their tokens with nothing in front of them. A teardown cut
+           *  short leaves a lock in front of what is left, never the reverse.
+           *
+           *  The active token counts among them: it is the live credential, and
+           *  the keychain outlives the app, so one that could not be erased is
+           *  one the next launch can recover. Erasing the lock over it would
+           *  leave that recovery with nothing to answer to.
+           *
+           *  The lock goes as one thing, which `clearAppLock` owns beside the
+           *  slots: every caller that may erase it has to erase the same three,
+           *  and a second copy of that list is a second chance to miss one. */
+          const canDropLock = canDropAppLock({
+            hasNoStoredWallet: !isLockOwed,
+            hasNoSavedSession: areSavedSessionsErased,
+            hasNoActiveToken: isActiveTokenErased,
+          })
+          if (canDropLock) {
+            /** Gone only when every slot says so: one that could not be erased
+             *  is a lock that is still set. */
+            isAppLockKept = !(await KeyStoreWrapper.clearAppLock())
+          }
+        }
+
+        logLogout()
+
+        if (token && isValidToken && deviceToken) {
+          await Promise.race([
+            userLogoutMutation({
+              context,
+              variables: { input: { deviceToken } },
+            }),
+            // Create a promise that rejects after 2 seconds
+            // this is handy for the case where the server is down, or in dev mode
+            new Promise((_, reject) => {
+              setTimeout(() => {
+                reject(new Error("Logout mutation timeout"))
+              }, 2000)
+            }),
+          ])
+        }
+      } catch (err: unknown) {
+        if (err instanceof Error) {
+          reportError("logout", err)
+          console.debug({ err }, `error logout`)
+        }
+      } finally {
+        if (stateToDefault) {
+          resetState()
+        }
+      }
+
+      return { isAppLockKept }
+    },
+    [resetState, clearToken, userLogoutMutation],
+  )
+
+  return {
+    logout,
+  }
+}
+
+export default useLogout

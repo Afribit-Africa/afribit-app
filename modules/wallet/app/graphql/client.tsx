@@ -1,0 +1,358 @@
+import { createClient } from "graphql-ws"
+import jsSha256 from "js-sha256"
+import React, { PropsWithChildren, useCallback, useEffect, useRef, useState } from "react"
+import DeviceInfo from "react-native-device-info"
+
+import {
+  ApolloClient,
+  ApolloLink,
+  ApolloProvider,
+  HttpLink,
+  NormalizedCacheObject,
+  split,
+} from "@apollo/client"
+import { NetworkError } from "@apollo/client/errors"
+import { setContext } from "@apollo/client/link/context"
+import { onError } from "@apollo/client/link/error"
+import { createPersistedQueryLink } from "@apollo/client/link/persisted-queries"
+import { RetryLink } from "@apollo/client/link/retry"
+import { GraphQLWsLink } from "@apollo/client/link/subscriptions"
+import { getMainDefinition } from "@apollo/client/utilities"
+
+import { useAppConfig } from "@app/hooks"
+import { AccountRegistryProvider } from "@app/hooks/use-account-registry"
+import { useEffectiveLanguage } from "@app/hooks/use-effective-language"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { ensureLocaleLoaded } from "@app/i18n/lazy-locale-loader"
+import { getAppCheckToken } from "@app/screens/get-started-screen/use-device-token"
+import { getLanguageFromString, getLocaleFromLanguage } from "@app/utils/locale-detector"
+
+import { isIos } from "../utils/helper"
+
+import { useApolloRebuildLifecycle } from "./hooks/use-apollo-rebuild-lifecycle"
+import { useEffectiveAuthToken } from "./hooks/use-effective-auth-token"
+import { AnalyticsContainer } from "./analytics"
+import {
+  recordBlinkServiceTransportError,
+  resetBlinkServicesStatus,
+} from "./blink-services-status"
+import { createCache } from "./cache"
+import { createPersistedCache, PersistedCache } from "./cache-persistence"
+import { useRealtimePriceQuery } from "./generated"
+import { createServerTimeLink } from "./server-time"
+import { HideAmountContainer } from "./hide-amount-component"
+import { IsAuthedContextProvider, useIsAuthed } from "./is-authed-context"
+import { LevelContainer } from "./level-component"
+import { MessagingContainer } from "./messaging"
+import { NetworkErrorContextProvider } from "./network-error-context"
+import {
+  createUnauthorizedRetryLink,
+  hasIdempotencyKey,
+  shouldRetryOperation,
+} from "./retry-policy"
+
+const getAuthorizationHeader = (token: string): string => {
+  return `Bearer ${token}`
+}
+
+const GaloyClient: React.FC<PropsWithChildren> = ({ children }) => {
+  const { appConfig } = useAppConfig()
+  const effectiveToken = useEffectiveAuthToken()
+
+  const [networkError, setNetworkError] = useState<NetworkError | undefined>(undefined)
+  const hasNetworkErrorRef = useRef<boolean>(false)
+
+  const clearNetworkError = useCallback(() => {
+    setNetworkError(undefined)
+    hasNetworkErrorRef.current = false
+  }, [])
+
+  const [apolloClient, setApolloClient] = useState<{
+    client: ApolloClient<NormalizedCacheObject>
+    isAuthed: boolean
+  }>()
+
+  const { registerActiveClient } = useApolloRebuildLifecycle(effectiveToken)
+
+  useEffect(() => {
+    /** Set when this client is superseded. Its persisted cache is retired so a late
+     *  write from the outgoing session cannot land in the next session's cache. */
+    let cancelled = false
+    let persistedCache: PersistedCache | undefined
+    ;(async () => {
+      const token = effectiveToken
+
+      console.log(
+        `creating new apollo client, token: ${Boolean(token)}, uri: ${
+          appConfig.galoyInstance.graphqlUri
+        }`,
+      )
+
+      const appCheckLink = setContext(async (_, { headers }) => {
+        const appCheckToken = await getAppCheckToken()
+        return appCheckToken
+          ? {
+              headers: {
+                ...headers,
+                Appcheck: appCheckToken,
+              },
+            }
+          : {
+              headers,
+            }
+      })
+
+      const wsLinkConnectionParams = async () => {
+        const authHeaders = token ? { Authorization: getAuthorizationHeader(token) } : {}
+        const appCheckToken = await getAppCheckToken()
+        const appCheckHeaders = appCheckToken ? { Appcheck: appCheckToken } : {}
+
+        return {
+          ...authHeaders,
+          ...appCheckHeaders,
+        }
+      }
+
+      const wsLink = new GraphQLWsLink(
+        createClient({
+          url: appConfig.galoyInstance.graphqlWsUri,
+          retryAttempts: 12,
+          connectionParams: wsLinkConnectionParams,
+          shouldRetry: (errOrCloseEvent) => {
+            console.warn(
+              { errOrCloseEvent },
+              "entering shouldRetry function for websocket",
+            )
+            // TODO: understand how the backend is closing the connection
+            // for instance during a new version rollout or k8s upgrade
+            //
+            // in the meantime:
+            // returning true instead of the default 'Any non-`CloseEvent`'
+            // to force createClient to attempt a reconnection
+            return true
+          },
+          // Voluntary not using: webSocketImpl: WebSocket
+          // seems react native already have an implement of the websocket?
+          //
+          // TODO: implement keepAlive and reconnection?
+          // https://github.com/enisdenjo/graphql-ws/blob/master/docs/interfaces/client.ClientOptions.md#keepalive
+        }),
+      )
+
+      const errorLink = onError(({ graphQLErrors, networkError }) => {
+        // graphqlErrors should be managed locally
+        if (graphQLErrors)
+          graphQLErrors.forEach(({ message, locations, path }) => {
+            if (message === "PersistedQueryNotFound") {
+              console.log(`[GraphQL info]: Message: ${message}, Path: ${path}}`, {
+                locations,
+              })
+            } else {
+              console.warn(`[GraphQL error]: Message: ${message}, Path: ${path}}`, {
+                locations,
+              })
+            }
+          })
+        // only network error are managed globally
+        if (networkError) {
+          console.log(`[Network error]: ${networkError}`)
+          recordBlinkServiceTransportError(networkError)
+          if (!hasNetworkErrorRef.current) {
+            setNetworkError(networkError)
+            hasNetworkErrorRef.current = true
+          }
+        }
+      })
+
+      const retryLink = new RetryLink({
+        attempts: {
+          max: 5,
+          retryIf: (error, operation) => {
+            console.debug(JSON.stringify(error), "retry on error")
+            return (
+              !hasIdempotencyKey(operation) &&
+              shouldRetryOperation(error, operation.operationName)
+            )
+          },
+        },
+      })
+
+      const retry401ErrorLink = createUnauthorizedRetryLink()
+
+      let authLink: ApolloLink
+      if (token) {
+        authLink = setContext((request, { headers }) => ({
+          headers: {
+            authorization: getAuthorizationHeader(token),
+            ...headers,
+          },
+        }))
+      } else {
+        authLink = setContext((request, { headers }) => ({
+          headers: {
+            authorization: "",
+            ...headers,
+          },
+        }))
+      }
+
+      // persistedQuery provide client side bandwidth optimization by returning a hash
+      // of the query instead of the whole query
+      //
+      // use the following line if you want to deactivate in dev
+      // const persistedQueryLink = httpLink
+      //
+      // we are using "js-sha256" because crypto-hash has compatibility issue with react-native
+      // from "@apollo/client/link/persisted-queries/types" but not exporterd
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      type SHA256Function = (...args: any[]) => string | PromiseLike<string>
+      const sha256: SHA256Function = jsSha256 as unknown as SHA256Function
+      const persistedQueryLink = createPersistedQueryLink({ sha256 })
+
+      const httpLink = new HttpLink({
+        uri: appConfig.galoyInstance.graphqlUri,
+      })
+
+      /** Records the server clock from each response's Date header, so a migration proof
+       *  the backend later rejects for device clock skew can be told from a real failure. */
+      const serverTimeLink = createServerTimeLink()
+
+      const link = split(
+        ({ query }) => {
+          const definition = getMainDefinition(query)
+          return (
+            definition.kind === "OperationDefinition" &&
+            definition.operation === "subscription"
+          )
+        },
+        wsLink,
+        ApolloLink.from([
+          errorLink,
+          serverTimeLink,
+          retryLink,
+          appCheckLink,
+          authLink,
+          retry401ErrorLink,
+          persistedQueryLink,
+          httpLink,
+        ]),
+      )
+
+      /** A new client means a new connection, and possibly a new instance or token, so
+       *  what the old one observed says nothing about this one. */
+      resetBlinkServicesStatus()
+
+      const cache = createCache()
+
+      const cachePersistence = createPersistedCache(cache)
+      persistedCache = cachePersistence
+
+      const readableVersion = DeviceInfo.getReadableVersion()
+
+      const client = new ApolloClient({
+        cache,
+        link,
+        name: isIos ? "iOS" : "Android",
+        version: readableVersion,
+        connectToDevTools: true,
+      })
+
+      await cachePersistence.open(token, () => cancelled)
+      if (cancelled) return
+
+      if (token) {
+        client.onClearStore(cachePersistence.persistor.purge)
+      }
+
+      registerActiveClient(client)
+      setApolloClient({
+        client,
+        isAuthed: Boolean(token),
+      })
+      clearNetworkError()
+    })()
+
+    return () => {
+      cancelled = true
+      persistedCache?.retire()
+    }
+  }, [effectiveToken, appConfig.galoyInstance, clearNetworkError, registerActiveClient])
+
+  // Before we show the app, we have to wait for our state to be ready.
+  // In the meantime, don't render anything. This will be the background
+  // color set in native by rootView's background color.
+  //
+  // This step should be completely covered over by the splash screen though.
+  //
+  // You're welcome to swap in your own component to render if your boot up
+  // sequence is too slow though.
+  if (!apolloClient) {
+    return <></>
+  }
+
+  return (
+    <ApolloProvider client={apolloClient.client}>
+      <IsAuthedContextProvider value={apolloClient.isAuthed}>
+        <AccountRegistryProvider>
+          <LevelContainer>
+            <HideAmountContainer>
+              <NetworkErrorContextProvider
+                value={{
+                  networkError,
+                  clearNetworkError,
+                  token: appConfig.token,
+                }}
+              >
+                <MessagingContainer />
+                <LanguageSync />
+                <AnalyticsContainer />
+                <MyPriceUpdates />
+                {children}
+              </NetworkErrorContextProvider>
+            </HideAmountContainer>
+          </LevelContainer>
+        </AccountRegistryProvider>
+      </IsAuthedContextProvider>
+    </ApolloProvider>
+  )
+}
+
+const MyPriceUpdates = () => {
+  const isAuthed = useIsAuthed()
+
+  const pollInterval = 5 * 60 * 1000 // 5 min
+  useRealtimePriceQuery({
+    // only fetch after pollInterval
+    // the first query is done by the home page automatically
+    fetchPolicy: "cache-only",
+    nextFetchPolicy: "network-only",
+    pollInterval,
+    skip: !isAuthed,
+  })
+
+  return null
+}
+
+const LanguageSync = () => {
+  const { language } = useEffectiveLanguage()
+
+  const userPreferredLocale = getLocaleFromLanguage(getLanguageFromString(language))
+  const { locale, setLocale } = useI18nContext()
+
+  useEffect(() => {
+    // Lazy load locale before switching if needed
+    const switchLocale = async () => {
+      if (userPreferredLocale !== locale) {
+        await ensureLocaleLoaded(userPreferredLocale)
+        setLocale(userPreferredLocale)
+      }
+    }
+    switchLocale()
+    // setLocale is not set as a dependency because it changes every render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userPreferredLocale, locale])
+
+  return <></>
+}
+
+export { GaloyClient }

@@ -1,0 +1,190 @@
+import Crypto from "react-native-quick-crypto"
+
+import { type AppDataFileEntry, CloudBackupErrorReason } from "@app/types/cloud-backup"
+
+type UploadParams = {
+  content: string
+  fileName: string
+  accessToken: string
+  existingId?: string
+}
+
+const DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
+const DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
+const DRIVE_APP_DATA_FOLDER = "appDataFolder"
+
+export class DriveError extends Error {
+  constructor(
+    readonly reason: CloudBackupErrorReason,
+    message: string,
+    /** Absent when the failure never reached Drive. Tells a dead token (401) from a
+     *  withheld permission (403), which share the auth reason but not the remedy. */
+    readonly status?: number,
+  ) {
+    super(message)
+    this.name = "DriveError"
+  }
+}
+
+const HTTP_STATUS_TO_REASON: Readonly<Record<number, CloudBackupErrorReason>> = {
+  401: CloudBackupErrorReason.Auth,
+  403: CloudBackupErrorReason.Auth,
+  404: CloudBackupErrorReason.NotFound,
+  429: CloudBackupErrorReason.Transient,
+}
+
+/** A withheld Drive scope arrives inside a 403; the current API and the legacy shape spell it
+ *  differently, so both markers map to the permission remedy rather than a plain auth error. */
+const SCOPE_INSUFFICIENT_MARKERS = [
+  "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+  "insufficientPermissions",
+] as const
+
+const hasScopeInsufficientMarker = (body: string): boolean =>
+  SCOPE_INSUFFICIENT_MARKERS.some((marker) => body.includes(marker))
+
+const classifyFailure = (status: number, body: string): CloudBackupErrorReason => {
+  if (status === 403 && hasScopeInsufficientMarker(body)) {
+    return CloudBackupErrorReason.PermissionDenied
+  }
+  const direct = HTTP_STATUS_TO_REASON[status]
+  if (direct) return direct
+  if (status >= 500) return CloudBackupErrorReason.Transient
+  return CloudBackupErrorReason.Unknown
+}
+
+const ClientOperation = {
+  Query: "query",
+  ListQuery: "list query",
+  Upload: "upload",
+  Download: "download",
+} as const
+
+type ClientOperation = (typeof ClientOperation)[keyof typeof ClientOperation]
+
+/** fetch has no timeout of its own, and a stalled request would hold its caller
+ *  forever, along with anything queued behind it. */
+const DRIVE_REQUEST_TIMEOUT_MS = 60_000
+
+const driveFetch = async (input: string, init?: RequestInit): Promise<Response> => {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), DRIVE_REQUEST_TIMEOUT_MS)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } catch (err) {
+    throw new DriveError(
+      CloudBackupErrorReason.Transient,
+      `Drive network error: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+const assertOkOrThrow = async (
+  response: Response,
+  operation: ClientOperation,
+): Promise<void> => {
+  if (response.ok) return
+  const body = await response.text().catch(() => "")
+  throw new DriveError(
+    classifyFailure(response.status, body),
+    `Drive ${operation} failed (${response.status}): ${body}`,
+    response.status,
+  )
+}
+
+const authHeader = (token: string) => ({ Authorization: `Bearer ${token}` })
+
+const randomBoundary = (): string => `blink_${Crypto.randomBytes(16).toString("hex")}`
+
+const escapeFileName = (name: string): string =>
+  name.replace(/\\/g, "\\\\").replace(/'/g, "\\'")
+
+export const buildMultipartBody = (
+  metadata: string,
+  content: string,
+  boundary: string,
+): string => {
+  const part = (contentType: string, data: string) =>
+    `--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n${data}`
+
+  return [
+    part("application/json; charset=UTF-8", metadata),
+    part("text/plain; charset=UTF-8", content),
+    `--${boundary}--`,
+  ].join("\r\n")
+}
+
+export const findAppDataFile = async (
+  fileName: string,
+  accessToken: string,
+): Promise<string | undefined> => {
+  const safeName = escapeFileName(fileName)
+  const query = encodeURIComponent(
+    `name='${safeName}' and '${DRIVE_APP_DATA_FOLDER}' in parents and trashed = false`,
+  )
+  const url = `${DRIVE_FILES_URL}?spaces=${DRIVE_APP_DATA_FOLDER}&q=${query}&fields=files(id)`
+
+  const response = await driveFetch(url, { headers: authHeader(accessToken) })
+  await assertOkOrThrow(response, ClientOperation.Query)
+
+  const data = (await response.json()) as { files: ReadonlyArray<{ id: string }> }
+  return data.files[0]?.id
+}
+
+export const listAppDataFiles = async (
+  filenamePrefix: string,
+  accessToken: string,
+): Promise<ReadonlyArray<AppDataFileEntry>> => {
+  const safePrefix = escapeFileName(filenamePrefix)
+  const query = encodeURIComponent(
+    `name contains '${safePrefix}' and '${DRIVE_APP_DATA_FOLDER}' in parents and trashed = false`,
+  )
+  const url = `${DRIVE_FILES_URL}?spaces=${DRIVE_APP_DATA_FOLDER}&q=${query}&fields=files(id,name)`
+
+  const response = await driveFetch(url, { headers: authHeader(accessToken) })
+  await assertOkOrThrow(response, ClientOperation.ListQuery)
+
+  const data = (await response.json()) as { files: ReadonlyArray<AppDataFileEntry> }
+  return data.files.filter((f) => f.name.startsWith(filenamePrefix))
+}
+
+export const uploadAppDataFile = async ({
+  content,
+  fileName,
+  accessToken,
+  existingId,
+}: UploadParams): Promise<void> => {
+  const metadata = existingId
+    ? JSON.stringify({ name: fileName })
+    : JSON.stringify({ name: fileName, parents: [DRIVE_APP_DATA_FOLDER] })
+
+  const boundary = randomBoundary()
+  const body = buildMultipartBody(metadata, content, boundary)
+
+  const url = existingId
+    ? `${DRIVE_UPLOAD_URL}/${existingId}?uploadType=multipart`
+    : `${DRIVE_UPLOAD_URL}?uploadType=multipart`
+
+  const response = await driveFetch(url, {
+    method: existingId ? "PATCH" : "POST",
+    headers: {
+      ...authHeader(accessToken),
+      "Content-Type": `multipart/related; boundary=${boundary}`,
+    },
+    body,
+  })
+  await assertOkOrThrow(response, ClientOperation.Upload)
+}
+
+export const downloadAppDataFile = async (
+  fileId: string,
+  accessToken: string,
+): Promise<string> => {
+  const url = `${DRIVE_FILES_URL}/${fileId}?alt=media`
+  const response = await driveFetch(url, { headers: authHeader(accessToken) })
+  await assertOkOrThrow(response, ClientOperation.Download)
+
+  return response.text()
+}

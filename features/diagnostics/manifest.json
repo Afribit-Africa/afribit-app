@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "diagnostics",
+  "displayName": { "en": "Diagnostics", "sw": "Uchunguzi" },
+  "tagline": { "en": "Check that one app failing never affects the others.", "sw": "Hakikisha programu moja ikiharibika haiathiri nyingine." },
+  "version": "0.1.0",
+  "owner": "afribit-africa",
+  "license": "internal-owned",
+  "classification": "B",
+  "kind": "native",
+  "readiness": "available",
+  "category": "tools",
+  "requires": { "network": "none", "account": false },
+  "requestedCapabilities": ["app.openService", "wallet.preparePayment"],
+  "networkDomains": [],
+  "isolation": { "process": "shell", "storageNamespace": "feature.diagnostics" },
+  "minimumHostContract": "1.0"
+}

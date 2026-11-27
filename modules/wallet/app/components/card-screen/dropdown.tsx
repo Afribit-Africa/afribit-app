@@ -1,0 +1,194 @@
+import React, { useState } from "react"
+import {
+  View,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  ScrollView,
+} from "react-native"
+import { makeStyles, useTheme, Text } from "@rn-vui/themed"
+import Icon from "react-native-vector-icons/Ionicons"
+import ReactNativeModal from "react-native-modal"
+
+import { radius } from "@app/rne-theme/radius"
+
+export interface DropdownOption {
+  value: string
+  label: string
+  description?: string
+}
+
+interface DropdownProps {
+  options: DropdownOption[]
+  selectedValue?: string
+  onValueChange?: (value: string) => void
+  placeholder?: string
+  loading?: boolean
+  disabled?: boolean
+  testID?: string
+}
+
+export const DropdownComponent: React.FC<DropdownProps> = ({
+  options,
+  selectedValue,
+  onValueChange,
+  placeholder,
+  loading = false,
+  disabled = false,
+  testID,
+}) => {
+  const styles = useStyles()
+  const {
+    theme: { colors },
+  } = useTheme()
+
+  const [isModalVisible, setModalVisible] = useState(false)
+  const [pendingSelection, setPendingSelection] = useState<string | null>(null)
+
+  const toggleModal = () => setModalVisible((visible) => !visible)
+
+  const handleSelect = (value: string) => {
+    toggleModal()
+    setPendingSelection(value)
+  }
+
+  const handleModalHide = () => {
+    if (pendingSelection !== null) {
+      onValueChange?.(pendingSelection)
+      setPendingSelection(null)
+    }
+  }
+
+  const currentOption = options.find((opt) => opt.value === selectedValue)
+  const displayText = currentOption?.label || placeholder
+
+  const isDisabled = loading || disabled
+
+  return (
+    <>
+      {/* The row reads as its own text without the role — a screen reader is
+          told what the current answer is and not that it is standing on the
+          control for changing it. `expanded` is the other half of that: whether
+          the list this opens is already open. */}
+      <TouchableWithoutFeedback
+        onPress={isDisabled ? undefined : toggleModal}
+        testID={testID}
+        accessibilityRole="button"
+        accessibilityState={{ disabled: isDisabled, expanded: isModalVisible }}
+      >
+        <View>
+          <View style={[styles.fieldBackground, isDisabled && styles.disabled]}>
+            <View style={styles.contentContainer}>
+              <Text type="p2" style={currentOption?.label ? {} : styles.placeholderText}>
+                {displayText}
+              </Text>
+              {currentOption?.description && (
+                <Text style={styles.descriptionText} type="p3">
+                  {currentOption.description}
+                </Text>
+              )}
+            </View>
+
+            <View style={styles.iconContainer}>
+              <Icon name="chevron-down" size={24} color={colors.accent} />
+            </View>
+          </View>
+        </View>
+      </TouchableWithoutFeedback>
+
+      <ReactNativeModal
+        style={styles.modal}
+        animationInTiming={200}
+        animationOutTiming={200}
+        animationIn="fadeInDown"
+        animationOut="fadeOutUp"
+        isVisible={isModalVisible}
+        onBackdropPress={toggleModal}
+        onBackButtonPress={toggleModal}
+        onModalHide={handleModalHide}
+      >
+        <ScrollView style={styles.optionsScroll}>
+          {options.map((option) => (
+            <TouchableOpacity
+              key={option.value}
+              onPress={() => handleSelect(option.value)}
+            >
+              <View
+                style={[
+                  styles.optionContainer,
+                  option.value === selectedValue && styles.selectedOption,
+                ]}
+              >
+                <View style={styles.optionContent}>
+                  <Text type="p2">{option.label}</Text>
+                  {option.description && (
+                    <Text style={styles.optionDescription} type="p4">
+                      {option.description}
+                    </Text>
+                  )}
+                </View>
+                {option.value === selectedValue && (
+                  <Icon name="checkmark" size={24} color={colors.accent} />
+                )}
+              </View>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </ReactNativeModal>
+    </>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  fieldBackground: {
+    flexDirection: "row",
+    backgroundColor: colors.surfaceInteractive,
+    alignItems: "center",
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    minHeight: 60,
+    borderRadius: radius.default,
+  },
+  contentContainer: {
+    flex: 1,
+    justifyContent: "center",
+  },
+  descriptionText: {
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  placeholderText: {
+    color: colors.textDisabled,
+  },
+  iconContainer: {
+    marginLeft: 12,
+  },
+  disabled: {
+    opacity: 0.5,
+  },
+  modal: {
+    justifyContent: "center",
+  },
+  optionsScroll: {
+    maxHeight: "80%",
+  },
+  optionContainer: {
+    flexDirection: "row",
+    backgroundColor: colors.surfaceInteractive,
+    paddingHorizontal: 14,
+    paddingVertical: 16,
+    borderRadius: radius.default,
+    alignItems: "center",
+    marginBottom: 10,
+    minHeight: 60,
+  },
+  selectedOption: {
+    backgroundColor: colors.neutral,
+  },
+  optionContent: {
+    flex: 1,
+  },
+  optionDescription: {
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+}))

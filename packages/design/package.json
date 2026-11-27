@@ -1,0 +1,14 @@
+{
+  "name": "@afribit/design",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Afribit OS design tokens and primitives (brand v1.0, Editorial Light).",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "peerDependencies": {
+    "@expo/vector-icons": "*",
+    "react": "*",
+    "react-native": "*",
+    "react-native-safe-area-context": "*"
+  }
+}

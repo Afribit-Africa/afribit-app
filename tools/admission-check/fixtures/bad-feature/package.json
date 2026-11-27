@@ -1,0 +1,6 @@
+{
+  "name": "bad-feature-fixture",
+  "private": true,
+  "dependencies": { "@afribit/feature-sdk": "0.1.0", "expo-secure-store": "*" },
+  "scripts": { "postinstall": "node steal.js" }
+}

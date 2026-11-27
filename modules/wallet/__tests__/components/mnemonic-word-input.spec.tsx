@@ -1,0 +1,102 @@
+import React, { createRef } from "react"
+import { StyleSheet, TextInput } from "react-native"
+import { render, fireEvent } from "@testing-library/react-native"
+
+import {
+  MnemonicWordInput,
+  MnemonicWordInputHandle,
+} from "@app/components/mnemonic-word-input"
+
+jest.mock("@rn-vui/themed", () => {
+  const colors = {
+    textMuted: "#999",
+    surfaceInteractive: "#f5f5f5",
+    accent: "#000",
+    textOnBackground: "#000",
+    transparent: "transparent",
+    success: "#0f0",
+    error: "#f00",
+  }
+  return {
+    makeStyles:
+      (fn: (theme: { colors: typeof colors }) => Record<string, object>) => () =>
+        fn({ colors }),
+    Text: ({ children, ...props }: { children: React.ReactNode }) =>
+      React.createElement("Text", props, children),
+    useTheme: () => ({ theme: { colors } }),
+  }
+})
+
+jest.mock("@app/components/atomic/galoy-icon", () => ({
+  GaloyIcon: () => null,
+}))
+
+jest.mock("@app/utils/testProps", () => ({
+  testProps: (id: string) => ({ testID: id }),
+}))
+
+describe("MnemonicWordInput", () => {
+  const defaultProps = {
+    index: 0,
+    value: "",
+    placeholder: "Word 1",
+    onChangeText: jest.fn(),
+    onFocus: jest.fn(),
+  }
+
+  it("renders placeholder when value is empty", () => {
+    const { getByPlaceholderText } = render(<MnemonicWordInput {...defaultProps} />)
+
+    expect(getByPlaceholderText("Word 1")).toBeTruthy()
+  })
+
+  it("shows word number when value is filled", () => {
+    const { getByText } = render(
+      <MnemonicWordInput {...defaultProps} index={2} value="alpha" />,
+    )
+
+    const wordNumber = getByText("3.")
+    expect(StyleSheet.flatten(wordNumber.props.style).opacity).toBeUndefined()
+  })
+
+  it("keeps word number mounted but hidden when value is empty", () => {
+    const { getByText } = render(<MnemonicWordInput {...defaultProps} index={0} />)
+
+    const wordNumber = getByText("1.")
+    expect(StyleSheet.flatten(wordNumber.props.style).opacity).toBe(0)
+  })
+
+  it("calls onChangeText when text changes", () => {
+    const onChangeText = jest.fn()
+    const { getByPlaceholderText } = render(
+      <MnemonicWordInput {...defaultProps} onChangeText={onChangeText} />,
+    )
+
+    fireEvent.changeText(getByPlaceholderText("Word 1"), "beta")
+
+    expect(onChangeText).toHaveBeenCalledWith("beta")
+  })
+
+  it("calls onFocus when input is focused", () => {
+    const onFocus = jest.fn()
+    const { getByPlaceholderText } = render(
+      <MnemonicWordInput {...defaultProps} onFocus={onFocus} />,
+    )
+
+    fireEvent(getByPlaceholderText("Word 1"), "focus")
+
+    expect(onFocus).toHaveBeenCalled()
+  })
+
+  it("forwards focus through ref to underlying TextInput", () => {
+    const ref = createRef<MnemonicWordInputHandle>()
+    const focusSpy = jest.spyOn(TextInput.prototype, "focus")
+
+    render(<MnemonicWordInput ref={ref} {...defaultProps} />)
+
+    ref.current?.focus()
+
+    expect(focusSpy).toHaveBeenCalled()
+    focusSpy.mockRestore()
+  })
+})

@@ -1,0 +1,68 @@
+import React from "react"
+import { TouchableOpacity } from "react-native"
+
+import { makeStyles, Text, useTheme } from "@rn-vui/themed"
+
+import { GaloyIcon, IconNamesType } from "../atomic/galoy-icon"
+
+import { radius } from "@app/rne-theme/radius"
+import { fonts } from "@app/rne-theme/fonts"
+
+type IconTextButtonProps = {
+  icon: IconNamesType
+  label: string
+  onPress: () => void
+  iconColor?: string
+  textColor?: string
+}
+
+export const IconTextButton: React.FC<IconTextButtonProps> = ({
+  icon,
+  label,
+  onPress,
+  iconColor,
+  textColor,
+}) => {
+  const {
+    theme: { colors },
+  } = useTheme()
+
+  const resolvedIconColor = iconColor ?? colors.accent
+  const resolvedTextColor = textColor ?? colors.accent
+  const styles = useStyles({ textColor: resolvedTextColor })
+
+  return (
+    <TouchableOpacity
+      style={styles.container}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
+      <Text style={styles.label}>{label}</Text>
+      <GaloyIcon name={icon} size={16} color={resolvedIconColor} />
+    </TouchableOpacity>
+  )
+}
+
+type StyleProps = {
+  textColor: string
+}
+
+const useStyles = makeStyles(({ colors }, { textColor }: StyleProps) => ({
+  container: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceInteractive,
+    borderRadius: radius.default,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  label: {
+    color: textColor,
+    fontSize: 14,
+    fontFamily: fonts.bold,
+    lineHeight: 20,
+  },
+}))

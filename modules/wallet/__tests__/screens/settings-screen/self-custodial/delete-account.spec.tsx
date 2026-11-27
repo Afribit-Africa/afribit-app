@@ -1,0 +1,407 @@
+import React from "react"
+import { Network as mockSparkNetwork } from "@breeztech/breez-sdk-spark-react-native"
+
+import { act, fireEvent, render } from "@testing-library/react-native"
+
+import { AccountStatus, AccountType } from "@app/types/wallet"
+
+import { DeleteAccount } from "@app/screens/settings-screen/self-custodial/delete-account"
+
+const TEST_SC_ACCOUNT_ID = "test-self-custodial-uuid"
+
+jest.mock("@react-navigation/native", () => ({
+  useNavigation: () => ({
+    dispatch: jest.fn(),
+    navigate: jest.fn(),
+    popTo: jest.fn(),
+    setOptions: jest.fn(),
+  }),
+  CommonActions: { reset: (args: unknown) => ({ type: "reset", payload: args }) },
+}))
+
+const mockSetAccountIsBeingDeleted = jest.fn()
+jest.mock("@app/screens/settings-screen/account/account-delete-context", () => ({
+  useAccountDeleteContext: () => ({
+    setAccountIsBeingDeleted: mockSetAccountIsBeingDeleted,
+    leaveWhileDeleting: (navigate: () => void) => navigate(),
+  }),
+}))
+
+jest.mock("@app/utils/toast", () => ({ toastShow: jest.fn() }))
+
+jest.mock("@rn-vui/themed", () => {
+  const colors: Record<string, string> = {
+    surfaceInteractive: "#f5f5f5",
+    accent: "#fc5805",
+    textOnBackground: "#000",
+    backgroundDefault: "#fff",
+    warning: "#F59E0B",
+  }
+  return {
+    makeStyles:
+      (
+        fn: (
+          theme: { colors: Record<string, string> },
+          params: Record<string, unknown>,
+        ) => Record<string, object>,
+      ) =>
+      (params: Record<string, unknown> = {}) =>
+        fn({ colors }, params),
+    Text: ({ children, ...props }: { children: React.ReactNode }) =>
+      React.createElement("Text", props, children),
+    useTheme: () => ({ theme: { colors, mode: "light" } }),
+  }
+})
+
+jest.mock("@app/components/card-screen", () => ({
+  InfoCard: ({ title }: { title: string }) =>
+    React.createElement("Text", { testID: "info-card" }, title),
+}))
+
+jest.mock("@app/screens/settings-screen/button", () => ({
+  SettingsButton: ({ onPress, title }: { onPress: () => void; title: string }) =>
+    React.createElement(
+      "Pressable",
+      { onPress, testID: "danger-zone-delete-button" },
+      React.createElement("Text", {}, title),
+    ),
+}))
+
+const lastWarningProps: {
+  isVisible?: boolean
+  onClose?: () => void
+  wallets?: ReadonlyArray<{ balance: { amount: number } }>
+} = {}
+jest.mock(
+  "@app/screens/settings-screen/self-custodial/delete-account-has-funds-modal",
+  () => ({
+    DeleteAccountHasFundsModal: (props: {
+      isVisible: boolean
+      onClose: () => void
+      wallets: ReadonlyArray<{ balance: { amount: number } }>
+    }) => {
+      lastWarningProps.isVisible = props.isVisible
+      lastWarningProps.onClose = props.onClose
+      lastWarningProps.wallets = props.wallets
+      return props.isVisible
+        ? React.createElement("View", { testID: "warning-modal" })
+        : null
+    },
+  }),
+)
+
+const lastConfirmProps: {
+  isVisible?: boolean
+  onClose?: () => void
+  onConfirm?: () => void | Promise<void>
+  onModalHide?: () => void | Promise<void>
+} = {}
+jest.mock(
+  "@app/screens/settings-screen/self-custodial/delete-account-confirm-modal",
+  () => ({
+    DeleteAccountConfirmModal: (props: {
+      isVisible: boolean
+      onClose: () => void
+      onConfirm: () => void | Promise<void>
+      onModalHide?: () => void | Promise<void>
+    }) => {
+      lastConfirmProps.isVisible = props.isVisible
+      lastConfirmProps.onClose = props.onClose
+      lastConfirmProps.onConfirm = props.onConfirm
+      lastConfirmProps.onModalHide = props.onModalHide
+      return props.isVisible
+        ? React.createElement("View", { testID: "confirm-modal" })
+        : null
+    },
+  }),
+)
+
+const mockDeleteWallet = jest
+  .fn()
+  .mockResolvedValue({ removed: false, outcome: "remained" })
+jest.mock("@app/self-custodial/hooks/use-delete-account", () => ({
+  useDeleteAccount: () => ({ deleteWallet: mockDeleteWallet }),
+}))
+
+const mockUseSelfCustodialWallet = jest.fn()
+jest.mock("@app/self-custodial/providers/wallet", () => ({
+  useSelfCustodialWallet: () => mockUseSelfCustodialWallet(),
+}))
+
+let mockNetwork = mockSparkNetwork.Mainnet
+const mockRouteAfterLogout = jest.fn()
+
+/** The shared logout route reaches the lock context, which pulls in native boot code this
+ *  screen never touches; only the way out it hands back is stood in for. */
+jest.mock("@app/hooks/use-logout-and-route", () => ({
+  useLogoutAndRoute: () => ({ routeAfterLogout: mockRouteAfterLogout }),
+}))
+
+jest.mock("@app/self-custodial/hooks/use-spark-network", () => ({
+  useSparkNetwork: () => mockNetwork,
+}))
+
+const mockFormatMoneyAmount = jest.fn(
+  ({ moneyAmount }: { moneyAmount: { amount: number; currencyCode: string } }) =>
+    `${moneyAmount.currencyCode} ${moneyAmount.amount}`,
+)
+jest.mock("@app/hooks/use-display-currency", () => ({
+  useDisplayCurrency: () => ({ formatMoneyAmount: mockFormatMoneyAmount }),
+}))
+
+jest.mock("@app/hooks/use-account-registry", () => ({
+  useAccountRegistry: () => ({
+    activeAccount: {
+      id: TEST_SC_ACCOUNT_ID,
+      type: AccountType.SelfCustodial,
+      label: "Spark",
+      selected: true,
+      status: AccountStatus.RequiresRestore,
+    },
+    selfCustodialEntries: [
+      { id: TEST_SC_ACCOUNT_ID, lightningAddress: "persisted@breez.tips" },
+    ],
+  }),
+}))
+
+jest.mock("@app/i18n/i18n-react", () => ({
+  useI18nContext: () => ({
+    LL: {
+      ProfileScreen: {
+        removedAccount: ({ identifier }: { identifier: string }) =>
+          `You removed account ${identifier}.`,
+      },
+      common: { anonymousUser: () => "Anon user" },
+      SelfCustodialDelete: {
+        removalFailed: ({ identifier }: { identifier: string }) =>
+          `Couldn't remove account ${identifier}. Please try again.`,
+        dangerZoneImportantTitle: () => "Important",
+        dangerZoneBulletReinstated: () => "Deleted account cannot be reinstated",
+        dangerZoneBulletPermanent: () => "Account deletion is permanent",
+        dangerZoneBulletEmpty: () => "Make sure account is empty",
+        dangerZoneDeleteButton: () => "Delete account and data",
+      },
+    },
+  }),
+}))
+
+const emptyWallet = (id: string, currency: "BTC" | "USD") => ({
+  id,
+  walletCurrency: currency,
+  balance: { amount: 0, currency, currencyCode: currency },
+  transactions: [],
+})
+
+const fundedWallet = (id: string, currency: "BTC" | "USD", amount: number) => ({
+  id,
+  walletCurrency: currency,
+  balance: { amount, currency, currencyCode: currency },
+  transactions: [],
+})
+
+describe("DeleteAccount", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockNetwork = mockSparkNetwork.Mainnet
+    lastWarningProps.isVisible = undefined
+    lastConfirmProps.isVisible = undefined
+  })
+
+  it("opens the confirm modal when both wallets are empty", () => {
+    mockUseSelfCustodialWallet.mockReturnValue({
+      wallets: [emptyWallet("btc", "BTC"), emptyWallet("usd", "USD")],
+    })
+
+    const { getByTestId, queryByTestId } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+
+    expect(getByTestId("confirm-modal")).toBeTruthy()
+    expect(queryByTestId("warning-modal")).toBeNull()
+  })
+
+  it("opens the warning modal (not confirm) when the BTC wallet has a balance", () => {
+    mockUseSelfCustodialWallet.mockReturnValue({
+      wallets: [fundedWallet("btc", "BTC", 21000), emptyWallet("usd", "USD")],
+    })
+
+    const { getByTestId, queryByTestId } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+
+    expect(getByTestId("warning-modal")).toBeTruthy()
+    expect(queryByTestId("confirm-modal")).toBeNull()
+    expect(mockDeleteWallet).not.toHaveBeenCalled()
+  })
+
+  it("opens the warning modal when only the USD wallet has a balance", () => {
+    mockUseSelfCustodialWallet.mockReturnValue({
+      wallets: [emptyWallet("btc", "BTC"), fundedWallet("usd", "USD", 500)],
+    })
+
+    const { getByTestId, queryByTestId } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+
+    expect(getByTestId("warning-modal")).toBeTruthy()
+    expect(queryByTestId("confirm-modal")).toBeNull()
+  })
+
+  it("warning onClose hides the warning without calling deleteWallet", () => {
+    mockUseSelfCustodialWallet.mockReturnValue({
+      wallets: [fundedWallet("btc", "BTC", 1), emptyWallet("usd", "USD")],
+    })
+
+    const { getByTestId, queryByTestId, rerender } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+    expect(getByTestId("warning-modal")).toBeTruthy()
+
+    act(() => {
+      lastWarningProps.onClose?.()
+    })
+    rerender(<DeleteAccount />)
+
+    expect(queryByTestId("warning-modal")).toBeNull()
+    expect(mockDeleteWallet).not.toHaveBeenCalled()
+  })
+
+  it("skips the warning on regtest and opens the confirm modal even with a funded wallet", () => {
+    mockNetwork = mockSparkNetwork.Regtest
+    mockUseSelfCustodialWallet.mockReturnValue({
+      wallets: [fundedWallet("btc", "BTC", 21000), emptyWallet("usd", "USD")],
+    })
+
+    const { getByTestId, queryByTestId } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+
+    expect(getByTestId("confirm-modal")).toBeTruthy()
+    expect(queryByTestId("warning-modal")).toBeNull()
+  })
+
+  it("confirm closes the modal and removes the account once the modal has hidden", async () => {
+    mockUseSelfCustodialWallet.mockReturnValue({
+      wallets: [emptyWallet("btc", "BTC"), emptyWallet("usd", "USD")],
+    })
+
+    const { getByTestId, queryByTestId, rerender } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+
+    await act(async () => {
+      await lastConfirmProps.onConfirm?.()
+    })
+    rerender(<DeleteAccount />)
+
+    expect(queryByTestId("confirm-modal")).toBeNull()
+    expect(mockDeleteWallet).not.toHaveBeenCalled()
+
+    await act(async () => {
+      await lastConfirmProps.onModalHide?.()
+    })
+
+    expect(mockDeleteWallet).toHaveBeenCalledTimes(1)
+    expect(mockDeleteWallet).toHaveBeenCalledWith(TEST_SC_ACCOUNT_ID)
+  })
+
+  it("drops a confirmed removal whose hide never came once the user cancels", async () => {
+    mockUseSelfCustodialWallet.mockReturnValue({
+      wallets: [emptyWallet("btc", "BTC"), emptyWallet("usd", "USD")],
+    })
+    const { getByTestId } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+
+    await act(async () => {
+      await lastConfirmProps.onConfirm?.()
+    })
+    act(() => lastConfirmProps.onClose?.())
+    await act(async () => {
+      await lastConfirmProps.onModalHide?.()
+    })
+
+    expect(mockDeleteWallet).not.toHaveBeenCalled()
+  })
+
+  it("locks the screen under the removed account's name, read before the switch", async () => {
+    mockUseSelfCustodialWallet.mockReturnValue({
+      lightningAddress: "alice@breez.tips",
+      wallets: [emptyWallet("btc", "BTC"), emptyWallet("usd", "USD")],
+    })
+
+    const { getByTestId, rerender } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+    await act(async () => {
+      await lastConfirmProps.onConfirm?.()
+    })
+
+    mockUseSelfCustodialWallet.mockReturnValue({
+      lightningAddress: "satoshin21@breez.tips",
+      wallets: [],
+    })
+    rerender(<DeleteAccount />)
+    await act(async () => {
+      await lastConfirmProps.onModalHide?.()
+    })
+
+    expect(mockSetAccountIsBeingDeleted).toHaveBeenCalledWith(true, "alice@breez.tips")
+  })
+
+  it("names the account from its persisted address while the live one has not loaded", async () => {
+    mockUseSelfCustodialWallet.mockReturnValue({
+      lightningAddress: null,
+      wallets: [emptyWallet("btc", "BTC"), emptyWallet("usd", "USD")],
+    })
+
+    const { getByTestId } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+    await act(async () => {
+      await lastConfirmProps.onConfirm?.()
+    })
+    await act(async () => {
+      await lastConfirmProps.onModalHide?.()
+    })
+
+    expect(mockSetAccountIsBeingDeleted).toHaveBeenCalledWith(
+      true,
+      "persisted@breez.tips",
+    )
+  })
+
+  /** A lock the wipe could not take is still owed an answer, so this one may not land on
+   *  the screen that opens a new account. */
+  it("returns through the gate when the deletion left the lock standing", async () => {
+    mockUseSelfCustodialWallet.mockReturnValue({
+      wallets: [emptyWallet("btc", "BTC"), emptyWallet("usd", "USD")],
+    })
+    mockDeleteWallet.mockResolvedValue({ removed: true, outcome: "logged-out-locked" })
+
+    const { getByTestId } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+
+    await act(async () => {
+      await lastConfirmProps.onConfirm?.()
+    })
+    await act(async () => {
+      await lastConfirmProps.onModalHide?.()
+    })
+
+    expect(mockRouteAfterLogout).toHaveBeenCalledWith(true)
+  })
+
+  /** The lock went with the wallet, so the flag has to come down with it. A relock raised
+   *  while the delete was in flight would otherwise stay up with no lock left to answer,
+   *  parking every later deep link behind it. */
+  it("lowers the lock flag when the deletion took the lock with it", async () => {
+    mockUseSelfCustodialWallet.mockReturnValue({
+      wallets: [emptyWallet("btc", "BTC"), emptyWallet("usd", "USD")],
+    })
+    mockDeleteWallet.mockResolvedValue({ removed: true, outcome: "logged-out" })
+
+    const { getByTestId } = render(<DeleteAccount />)
+    fireEvent.press(getByTestId("danger-zone-delete-button"))
+
+    await act(async () => {
+      await lastConfirmProps.onConfirm?.()
+    })
+    await act(async () => {
+      await lastConfirmProps.onModalHide?.()
+    })
+
+    expect(mockRouteAfterLogout).toHaveBeenCalledWith(false)
+  })
+})

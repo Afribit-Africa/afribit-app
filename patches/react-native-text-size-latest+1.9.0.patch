@@ -1,0 +1,119 @@
+diff --git a/node_modules/react-native-text-size-latest/android/build.gradle b/node_modules/react-native-text-size-latest/android/build.gradle
+index c496f8b..4663b53 100644
+--- a/node_modules/react-native-text-size-latest/android/build.gradle
++++ b/node_modules/react-native-text-size-latest/android/build.gradle
+@@ -16,7 +16,7 @@ def _minSdkVersion      = safeExtGet('minSdkVersion', 21)
+ buildscript {
+     repositories {
+         google()
+-        jcenter()
++        mavenCentral() // jcenter was removed in Gradle 9
+     }
+     dependencies {
+         classpath("com.android.tools.build:gradle:7.3.1")
+@@ -43,7 +43,7 @@ android {
+ repositories {
+     mavenLocal()
+     google()
+-    jcenter()
++    mavenCentral() // jcenter was removed in Gradle 9
+     maven {
+         // All of React Native (JS, Obj-C sources, Android binaries) is installed from npm
+         url "$rootDir/../node_modules/react-native/android"
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/annotation_processor_list/release/javaPreCompileRelease/annotationProcessors.json b/node_modules/react-native-text-size-latest/android/build/intermediates/annotation_processor_list/release/javaPreCompileRelease/annotationProcessors.json
+new file mode 100644
+index 0000000..9e26dfe
+--- /dev/null
++++ b/node_modules/react-native-text-size-latest/android/build/intermediates/annotation_processor_list/release/javaPreCompileRelease/annotationProcessors.json
+@@ -0,0 +1 @@
++{}
+\ No newline at end of file
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/compile_r_class_jar/release/generateReleaseRFile/R.jar b/node_modules/react-native-text-size-latest/android/build/intermediates/compile_r_class_jar/release/generateReleaseRFile/R.jar
+new file mode 100644
+index 0000000..680f259
+Binary files /dev/null and b/node_modules/react-native-text-size-latest/android/build/intermediates/compile_r_class_jar/release/generateReleaseRFile/R.jar differ
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/compile_symbol_list/release/generateReleaseRFile/R.txt b/node_modules/react-native-text-size-latest/android/build/intermediates/compile_symbol_list/release/generateReleaseRFile/R.txt
+new file mode 100644
+index 0000000..e69de29
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/incremental/mergeReleaseJniLibFolders/merger.xml b/node_modules/react-native-text-size-latest/android/build/intermediates/incremental/mergeReleaseJniLibFolders/merger.xml
+new file mode 100644
+index 0000000..67501fe
+--- /dev/null
++++ b/node_modules/react-native-text-size-latest/android/build/intermediates/incremental/mergeReleaseJniLibFolders/merger.xml
+@@ -0,0 +1,2 @@
++<?xml version="1.0" encoding="utf-8"?>
++<merger version="3"><dataSet config="main" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"><source path="/root/afribit-wallet/node_modules/react-native-text-size-latest/android/src/main/jniLibs"/></dataSet><dataSet config="release" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"><source path="/root/afribit-wallet/node_modules/react-native-text-size-latest/android/src/release/jniLibs"/></dataSet></merger>
+\ No newline at end of file
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/incremental/release/packageReleaseResources/compile-file-map.properties b/node_modules/react-native-text-size-latest/android/build/intermediates/incremental/release/packageReleaseResources/compile-file-map.properties
+new file mode 100644
+index 0000000..7a883f4
+--- /dev/null
++++ b/node_modules/react-native-text-size-latest/android/build/intermediates/incremental/release/packageReleaseResources/compile-file-map.properties
+@@ -0,0 +1 @@
++#Mon Nov 23 18:31:24 PST 2026
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/incremental/release/packageReleaseResources/merger.xml b/node_modules/react-native-text-size-latest/android/build/intermediates/incremental/release/packageReleaseResources/merger.xml
+new file mode 100644
+index 0000000..6ac39e6
+--- /dev/null
++++ b/node_modules/react-native-text-size-latest/android/build/intermediates/incremental/release/packageReleaseResources/merger.xml
+@@ -0,0 +1,2 @@
++<?xml version="1.0" encoding="utf-8"?>
++<merger version="3"><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="main$Generated" generated="true" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"><source path="/root/afribit-wallet/node_modules/react-native-text-size-latest/android/src/main/res"/></dataSet><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="main" generated-set="main$Generated" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~:!&lt;dir>navigation"><source path="/root/afribit-wallet/node_modules/react-native-text-size-latest/android/src/main/res"/></dataSet><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="release$Generated" generated="true" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"><source path="/root/afribit-wallet/node_modules/react-native-text-size-latest/android/src/release/res"/></dataSet><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="release" generated-set="release$Generated" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~:!&lt;dir>navigation"><source path="/root/afribit-wallet/node_modules/react-native-text-size-latest/android/src/release/res"/></dataSet><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="generated$Generated" generated="true" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"/><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="generated" generated-set="generated$Generated" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~:!&lt;dir>navigation"/><mergedItems/></merger>
+\ No newline at end of file
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeConf.class b/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeConf.class
+new file mode 100644
+index 0000000..101c4c0
+Binary files /dev/null and b/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeConf.class differ
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizePackage.class b/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizePackage.class
+new file mode 100644
+index 0000000..85a94eb
+Binary files /dev/null and b/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizePackage.class differ
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeSpannedText$CustomLetterSpacingSpan.class b/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeSpannedText$CustomLetterSpacingSpan.class
+new file mode 100644
+index 0000000..bc7c9f7
+Binary files /dev/null and b/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeSpannedText$CustomLetterSpacingSpan.class differ
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeSpannedText$CustomStyleSpan.class b/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeSpannedText$CustomStyleSpan.class
+new file mode 100644
+index 0000000..83f5022
+Binary files /dev/null and b/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeSpannedText$CustomStyleSpan.class differ
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeSpannedText.class b/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeSpannedText.class
+new file mode 100644
+index 0000000..27578ae
+Binary files /dev/null and b/node_modules/react-native-text-size-latest/android/build/intermediates/javac/release/compileReleaseJavaWithJavac/classes/com/github/amarcruz/rntextsize/RNTextSizeSpannedText.class differ
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/local_only_symbol_list/release/parseReleaseLocalResources/R-def.txt b/node_modules/react-native-text-size-latest/android/build/intermediates/local_only_symbol_list/release/parseReleaseLocalResources/R-def.txt
+new file mode 100644
+index 0000000..78ac5b8
+--- /dev/null
++++ b/node_modules/react-native-text-size-latest/android/build/intermediates/local_only_symbol_list/release/parseReleaseLocalResources/R-def.txt
+@@ -0,0 +1,2 @@
++R_DEF: Internal format may change without notice
++local
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/nested_resources_validation_report/release/generateReleaseResources/nestedResourcesValidationReport.txt b/node_modules/react-native-text-size-latest/android/build/intermediates/nested_resources_validation_report/release/generateReleaseResources/nestedResourcesValidationReport.txt
+new file mode 100644
+index 0000000..08f4ebe
+--- /dev/null
++++ b/node_modules/react-native-text-size-latest/android/build/intermediates/nested_resources_validation_report/release/generateReleaseResources/nestedResourcesValidationReport.txt
+@@ -0,0 +1 @@
++0 Warning/Error
+\ No newline at end of file
+diff --git a/node_modules/react-native-text-size-latest/android/build/intermediates/symbol_list_with_package_name/release/generateReleaseRFile/package-aware-r.txt b/node_modules/react-native-text-size-latest/android/build/intermediates/symbol_list_with_package_name/release/generateReleaseRFile/package-aware-r.txt
+new file mode 100644
+index 0000000..be39d13
+--- /dev/null
++++ b/node_modules/react-native-text-size-latest/android/build/intermediates/symbol_list_with_package_name/release/generateReleaseRFile/package-aware-r.txt
+@@ -0,0 +1 @@
++com.github.amarcruz.rntextsize
+diff --git a/node_modules/react-native-text-size-latest/android/src/main/java/com/github/amarcruz/rntextsize/RNTextSizeModule.java b/node_modules/react-native-text-size-latest/android/src/main/java/com/github/amarcruz/rntextsize/RNTextSizeModule.java
+index 088c294..c4284a7 100644
+--- a/node_modules/react-native-text-size-latest/android/src/main/java/com/github/amarcruz/rntextsize/RNTextSizeModule.java
++++ b/node_modules/react-native-text-size-latest/android/src/main/java/com/github/amarcruz/rntextsize/RNTextSizeModule.java
+@@ -433,7 +433,8 @@ class RNTextSizeModule extends ReactContextBaseJavaModule {
+      */
+     @SuppressWarnings("deprecation")
+     private float getCurrentDensity() {
+-        return DisplayMetricsHolder.getWindowDisplayMetrics().density;
++        // RN 0.88 removed DisplayMetricsHolder.getWindowDisplayMetrics(); same density source.
++        return mReactContext.getResources().getDisplayMetrics().density;
+     }
+ 
+     private static final String[] FILE_EXTENSIONS = {".ttf", ".otf"};

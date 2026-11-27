@@ -1,0 +1,207 @@
+import React from "react"
+import { Linking, Platform, StyleSheet } from "react-native"
+import type { ReactTestInstance } from "react-test-renderer"
+
+import { fireEvent, render } from "@testing-library/react-native"
+import { ThemeProvider } from "@rn-vui/themed"
+import { fonts } from "@app/rne-theme/fonts"
+import theme from "@app/rne-theme/theme"
+import TypesafeI18n from "@app/i18n/i18n-react"
+import { i18nObject } from "@app/i18n/i18n-util"
+import { loadLocale } from "@app/i18n/i18n-util.sync"
+
+const mockUseWalletOverviewScreenQuery = jest.fn()
+jest.mock("@app/graphql/generated", () => ({
+  useWalletOverviewScreenQuery: (...args: unknown[]) =>
+    mockUseWalletOverviewScreenQuery(...args),
+  WalletCurrency: { Btc: "BTC", Usd: "USD" },
+}))
+
+let mockIsAuthed = true
+jest.mock("@app/graphql/is-authed-context", () => ({
+  useIsAuthed: () => mockIsAuthed,
+}))
+
+let mockBtcFiat: string | undefined = "$22.42"
+jest.mock("@app/hooks/use-display-currency", () => ({
+  useDisplayCurrency: () => ({
+    formatMoneyAmount: () => "21,493 sats",
+    moneyAmountToDisplayCurrencyString: ({
+      moneyAmount,
+    }: {
+      moneyAmount: { currency: string }
+    }) => (moneyAmount.currency === "BTC" ? mockBtcFiat : "$0.20"),
+  }),
+}))
+
+const mockOpenSupport = jest.fn()
+jest.mock("@app/hooks/use-contact-support", () => ({
+  useContactSupport: () => ({ openSupport: mockOpenSupport }),
+}))
+
+jest.mock("@app/config/afribit-links", () => ({
+  AFRIBIT_LINKS: {
+    blog: "https://afribit.africa/blog",
+    nonCustodialArticle: "",
+    termsAndConditions: "",
+    privacyPolicy: "",
+    faq: "",
+    blockedCountriesFaq: "https://afribit.africa/blocked-countries",
+    supportEmail: "connect@afribit.africa",
+    feedbackEmail: "connect@afribit.africa",
+    whatsAppSupport: "",
+    website: "https://afribit.africa",
+  },
+}))
+
+import { BLOCKED_COUNTRIES_FAQ_LINK } from "@app/config"
+import { RestrictedRegionScreen } from "@app/custodial/components/restricted-region-screen"
+
+loadLocale("en")
+const LL = i18nObject("en")
+
+const walletsData = {
+  me: {
+    defaultAccount: {
+      wallets: [
+        { id: "btc-1", walletCurrency: "BTC", balance: 21493 },
+        { id: "usd-1", walletCurrency: "USD", balance: 20 },
+      ],
+    },
+  },
+}
+
+const renderScreen = () =>
+  render(
+    <ThemeProvider theme={theme}>
+      <TypesafeI18n locale="en">
+        <RestrictedRegionScreen />
+      </TypesafeI18n>
+    </ThemeProvider>,
+  )
+
+describe("RestrictedRegionScreen", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockIsAuthed = true
+    mockBtcFiat = "$22.42"
+    mockUseWalletOverviewScreenQuery.mockReturnValue({ data: walletsData })
+  })
+
+  it("shows the fixed copy with both balances", () => {
+    const { getByText } = renderScreen()
+
+    expect(getByText(LL.RestrictedRegion.title())).toBeTruthy()
+    expect(
+      getByText(`${LL.RestrictedRegion.body()}\n\n${LL.RestrictedRegion.bodyReturn()}`),
+    ).toBeTruthy()
+    expect(getByText(LL.common.btcAccount())).toBeTruthy()
+    expect(getByText("21,493 sats ($22.42)")).toBeTruthy()
+    expect(getByText(LL.common.usdAccount())).toBeTruthy()
+    expect(getByText("$0.20")).toBeTruthy()
+  })
+
+  /** Bold is the bold face with no weight on Android: a weight of 700 or more makes it
+   *  look for `SourceSansPro-Bold_bold.ttf` and fall back to Roboto. */
+  describe("on Android", () => {
+    const originalOS = Platform.OS
+
+    beforeEach(() => {
+      Platform.OS = "android"
+    })
+
+    afterEach(() => {
+      Platform.OS = originalOS
+    })
+
+    const expectBoldFace = (element: ReactTestInstance) => {
+      const style = StyleSheet.flatten(element.props.style)
+      expect(style.fontFamily).toBe(fonts.bold)
+      expect(Number(style.fontWeight ?? 0)).toBeLessThan(700)
+    }
+
+    it("renders the title in the bold face", () => {
+      const { getByText } = renderScreen()
+
+      expectBoldFace(getByText(LL.RestrictedRegion.title()))
+    })
+
+    it("renders the native sat amount bold and the fiat conversion plain", () => {
+      const { getByText } = renderScreen()
+
+      expectBoldFace(getByText("21,493 sats"))
+      expect(getByText("($22.42)")).toHaveStyle({ fontFamily: fonts.regular })
+      expectBoldFace(getByText("$0.20"))
+    })
+  })
+
+  it("renders the bitcoin balance without parentheses when no fiat resolves", () => {
+    mockBtcFiat = undefined
+
+    const { getByText } = renderScreen()
+
+    expect(getByText("21,493 sats")).toBeTruthy()
+  })
+
+  it("hosts a native modal that swallows the Android back press", () => {
+    const { getByTestId } = renderScreen()
+
+    const host = getByTestId("restricted-region-screen-host")
+    expect(() => host.props.onRequestClose()).not.toThrow()
+  })
+
+  it("opens the support inbox on Contact support", () => {
+    const { getByTestId } = renderScreen()
+
+    fireEvent.press(getByTestId("restricted-region-contact-support"))
+
+    expect(mockOpenSupport).toHaveBeenCalledTimes(1)
+  })
+
+  it("opens the explanation link on Learn more", () => {
+    const openUrlSpy = jest
+      .spyOn(Linking, "openURL")
+      .mockResolvedValue(undefined as never)
+    const { getByText } = renderScreen()
+
+    fireEvent.press(getByText(LL.RestrictedRegion.learnMore()))
+
+    expect(openUrlSpy).toHaveBeenCalledWith(BLOCKED_COUNTRIES_FAQ_LINK)
+  })
+
+  it("skips the balances query and hides the rows when unauthenticated", () => {
+    mockIsAuthed = false
+    mockUseWalletOverviewScreenQuery.mockReturnValue({ data: undefined })
+
+    const { queryByText } = renderScreen()
+
+    expect(mockUseWalletOverviewScreenQuery).toHaveBeenCalledWith({ skip: true })
+    expect(queryByText(LL.common.btcAccount())).toBeNull()
+  })
+
+  it("hides the balance rows when one wallet is missing", () => {
+    mockUseWalletOverviewScreenQuery.mockReturnValue({
+      data: {
+        me: {
+          defaultAccount: {
+            wallets: [{ id: "btc-1", walletCurrency: "BTC", balance: 21493 }],
+          },
+        },
+      },
+    })
+
+    const { queryByText } = renderScreen()
+
+    expect(queryByText(LL.common.btcAccount())).toBeNull()
+  })
+
+  it("hides the balance rows while the query has no data yet", () => {
+    mockUseWalletOverviewScreenQuery.mockReturnValue({ data: undefined })
+
+    const { queryByText, getByText } = renderScreen()
+
+    expect(getByText(LL.RestrictedRegion.title())).toBeTruthy()
+    expect(queryByText(LL.common.btcAccount())).toBeNull()
+    expect(queryByText(LL.common.usdAccount())).toBeNull()
+  })
+})

@@ -1,0 +1,138 @@
+import React, { PropsWithChildren } from "react"
+import type { ReactTestInstance } from "react-test-renderer"
+
+import { MockedProvider } from "@apollo/client/testing"
+import mocks from "@app/graphql/mocks"
+import TypesafeI18n from "@app/i18n/i18n-react"
+import theme from "@app/rne-theme/theme"
+import { light, dark } from "@app/rne-theme/colors"
+import { detectDefaultLocale } from "@app/utils/locale-detector"
+import { NavigationContainer } from "@react-navigation/native"
+import { createNativeStackNavigator } from "@react-navigation/native-stack"
+import { createTheme, ThemeProvider } from "@rn-vui/themed"
+
+import { createCache } from "../../app/graphql/cache"
+import { IsAuthedContextProvider } from "../../app/graphql/is-authed-context"
+import {
+  AccountRegistryContext,
+  createCustodialDescriptor,
+  type AccountRegistryResult,
+} from "../../app/hooks/use-account-registry"
+import { PersistentStateContext } from "../../app/store/persistent-state"
+
+/** The settled registry of an authed custodial account, provided statically. The real
+ *  provider reads the device twice and commits those reads after `render` returns,
+ *  which React reports as updates outside `act` in every screen test; the provider's
+ *  own behaviour is covered by __tests__/hooks/use-account-registry.spec.tsx. */
+const custodialAccount = { ...createCustodialDescriptor("Blink"), selected: true }
+
+const settledRegistry: AccountRegistryResult = {
+  accounts: [custodialAccount],
+  activeAccount: custodialAccount,
+  selfCustodialEntries: [],
+  loading: false,
+  setActiveAccountId: () => {},
+  reloadSelfCustodialAccounts: async () => {},
+}
+
+const StaticAccountRegistryProvider: React.FC<PropsWithChildren> = ({ children }) => (
+  <AccountRegistryContext.Provider value={settledRegistry}>
+    {children}
+  </AccountRegistryContext.Provider>
+)
+
+const PersistentStateWrapper: React.FC<PropsWithChildren> = ({ children }) => (
+  <PersistentStateContext.Provider
+    value={{
+      persistentState: {
+        schemaVersion: 24,
+        galoyInstance: {
+          id: "Main",
+        },
+        galoyAuthToken: "",
+      },
+      updateState: () => {},
+      resetState: () => {},
+      clearToken: async () => true,
+    }}
+  >
+    <>{children}</>
+  </PersistentStateContext.Provider>
+)
+
+export const findPressableParent = (
+  node: ReactTestInstance | null,
+): ReactTestInstance => {
+  let current: ReactTestInstance | null = node
+  while (current && !current.props?.onPress) {
+    current = current.parent
+  }
+  if (!current) {
+    throw new Error("Pressable parent not found")
+  }
+  return current
+}
+
+const Stack = createNativeStackNavigator()
+
+type ThemeMode = "light" | "dark"
+
+const createThemeWithMode = (mode: ThemeMode) =>
+  createTheme({
+    lightColors: light,
+    darkColors: dark,
+    mode,
+  })
+
+export const ContextForScreen: React.FC<PropsWithChildren<{ headerShown?: boolean }>> = ({
+  children,
+  headerShown = false,
+}) => (
+  <ThemeProvider theme={theme}>
+    <NavigationContainer>
+      <Stack.Navigator screenOptions={{ headerShown }}>
+        <Stack.Screen name="Home">
+          {() => (
+            <MockedProvider mocks={mocks} cache={createCache()}>
+              <PersistentStateWrapper>
+                <TypesafeI18n locale={detectDefaultLocale()}>
+                  <IsAuthedContextProvider value={true}>
+                    <StaticAccountRegistryProvider>
+                      {children}
+                    </StaticAccountRegistryProvider>
+                  </IsAuthedContextProvider>
+                </TypesafeI18n>
+              </PersistentStateWrapper>
+            </MockedProvider>
+          )}
+        </Stack.Screen>
+      </Stack.Navigator>
+    </NavigationContainer>
+  </ThemeProvider>
+)
+
+export const ContextForScreenWithTheme: React.FC<
+  PropsWithChildren<{ mode: ThemeMode }>
+> = ({ children, mode }) => (
+  <ThemeProvider theme={createThemeWithMode(mode)}>
+    <NavigationContainer>
+      <Stack.Navigator screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="Home">
+          {() => (
+            <MockedProvider mocks={mocks} cache={createCache()}>
+              <PersistentStateWrapper>
+                <TypesafeI18n locale={detectDefaultLocale()}>
+                  <IsAuthedContextProvider value={true}>
+                    <StaticAccountRegistryProvider>
+                      {children}
+                    </StaticAccountRegistryProvider>
+                  </IsAuthedContextProvider>
+                </TypesafeI18n>
+              </PersistentStateWrapper>
+            </MockedProvider>
+          )}
+        </Stack.Screen>
+      </Stack.Navigator>
+    </NavigationContainer>
+  </ThemeProvider>
+)

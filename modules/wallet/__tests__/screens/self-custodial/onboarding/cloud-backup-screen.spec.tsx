@@ -1,0 +1,385 @@
+import React from "react"
+import { ActivityIndicator } from "react-native"
+import { render, fireEvent } from "@testing-library/react-native"
+import { loadLocale } from "@app/i18n/i18n-util.sync"
+import { i18nObject } from "@app/i18n/i18n-util"
+
+import { IconHero } from "@app/components/icon-hero"
+import { MigrationCheckpoint } from "@app/screens/account-migration/hooks"
+import { InfoBanner } from "@app/components/info-banner"
+import { CloudBackupScreen } from "@app/screens/self-custodial/onboarding/cloud-backup-screen"
+import theme from "@app/rne-theme/theme"
+import { ContextForScreen } from "../../helper"
+import { flushEffects } from "../../../helpers/flush-effects"
+
+/** The W-D11 gate has its own spec (sensitive-action-gate.spec.tsx). Here it is a
+ *  switch, so a case can say whether the user passed it. */
+let mockGateOpen = true
+const mockGateDescription = jest.fn()
+jest.mock("@app/components/sensitive-action-gate", () => ({
+  SensitiveActionGate: ({
+    description,
+    children,
+  }: {
+    description: string
+    children: React.ReactNode
+  }) => {
+    mockGateDescription(description)
+    return mockGateOpen ? children : null
+  },
+}))
+
+const mockHandleBackup = jest.fn()
+let mockLoading = false
+let mockIsValid = true
+let mockIsEncrypted = false
+const mockUseCloudBackup = jest.fn()
+const mockToggleEncryption = jest.fn()
+const mockSetPassword = jest.fn()
+const mockSetConfirmPassword = jest.fn()
+
+jest.mock("@app/screens/self-custodial/onboarding/hooks", () => ({
+  useCloudBackupForm: () => ({
+    isEncrypted: mockIsEncrypted,
+    password: "ValidPass1234!",
+    confirmPassword: "ValidPass1234!",
+    toggleEncryption: mockToggleEncryption,
+    setPassword: mockSetPassword,
+    setConfirmPassword: mockSetConfirmPassword,
+    passwordError: undefined,
+    confirmPasswordError: undefined,
+    isValid: mockIsValid,
+  }),
+  useCloudBackup: (args: unknown) => {
+    mockUseCloudBackup(args)
+    return {
+      handleBackup: mockHandleBackup,
+      loading: mockLoading,
+    }
+  },
+}))
+
+const mockReleaseScreenSecurity = jest.fn(() => Promise.resolve())
+const mockAcquireScreenSecurity = jest.fn()
+jest.mock("@app/utils/screen-security", () => ({
+  acquireScreenSecurity: () => mockAcquireScreenSecurity(),
+}))
+
+const mockUseMigrationBackupCheckpoint = jest.fn()
+
+jest.mock("@app/screens/account-migration/hooks", () => ({
+  ...jest.requireActual("@app/screens/account-migration/hooks"),
+  useMigrationBackupCheckpoint: (step: string) => mockUseMigrationBackupCheckpoint(step),
+}))
+
+jest.mock("@app/components/icon-hero", () => {
+  const { Text } = jest.requireActual("react-native")
+  return {
+    IconHero: jest.fn(({ title, subtitle }: { title: string; subtitle: string }) => (
+      <>
+        <Text>{title}</Text>
+        <Text>{subtitle}</Text>
+      </>
+    )),
+  }
+})
+
+jest.mock("@app/components/info-banner", () => {
+  const { Text } = jest.requireActual("react-native")
+  return {
+    InfoBanner: jest.fn(
+      ({ title, children }: { title?: string; children: React.ReactNode }) => (
+        <>
+          {title ? <Text>{title}</Text> : null}
+          {children}
+        </>
+      ),
+    ),
+  }
+})
+
+loadLocale("en")
+const LL = i18nObject("en")
+
+/** Settles the screen guard's lease, whose resolution updates the hook's state. */
+const renderScreen = async () => {
+  const rendered = render(
+    <ContextForScreen>
+      <CloudBackupScreen />
+    </ContextForScreen>,
+  )
+  await flushEffects()
+  return rendered
+}
+
+describe("CloudBackupScreen", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockAcquireScreenSecurity.mockReturnValue({
+      ready: Promise.resolve(),
+      release: mockReleaseScreenSecurity,
+    })
+    mockLoading = false
+    mockIsValid = true
+    mockIsEncrypted = false
+  })
+
+  it("renders title and subtitle", async () => {
+    const { getByText } = render(
+      <ContextForScreen>
+        <CloudBackupScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    expect(getByText(LL.BackupScreen.CloudBackup.title())).toBeTruthy()
+  })
+
+  it("renders the continue button", async () => {
+    const { getByText } = render(
+      <ContextForScreen>
+        <CloudBackupScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    expect(getByText(LL.BackupScreen.CloudBackup.continueButton())).toBeTruthy()
+  })
+
+  /** Additional encryption is opt-in, so a backup can finish with no passphrase. */
+  it("hides the passphrase fields until the user opts in", async () => {
+    const { getByText, queryByText } = render(
+      <ContextForScreen>
+        <CloudBackupScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    expect(getByText(LL.BackupScreen.CloudBackup.encryptCheckbox())).toBeTruthy()
+    expect(queryByText(LL.BackupScreen.CloudBackup.password())).toBeNull()
+    expect(queryByText(LL.BackupScreen.CloudBackup.confirmPassword())).toBeNull()
+    expect(queryByText(LL.BackupScreen.CloudBackup.importantTitle())).toBeNull()
+  })
+
+  it("calls handleBackup on continue press", async () => {
+    const { getByText } = render(
+      <ContextForScreen>
+        <CloudBackupScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    fireEvent.press(getByText(LL.BackupScreen.CloudBackup.continueButton()))
+    expect(mockHandleBackup).toHaveBeenCalled()
+  })
+
+  /** useCloudBackup reports loading while the phrase is still being read and the pubkey
+   *  derived. The hook refuses to run in that window; the screen's job is to show it, so the
+   *  user sees a spinner instead of a button that looks idle. */
+  it("shows the button in its loading state while the hook reports loading", async () => {
+    mockLoading = true
+
+    const view = render(
+      <ContextForScreen>
+        <CloudBackupScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    expect(view.UNSAFE_queryByType(ActivityIndicator)).toBeTruthy()
+  })
+
+  it("renders the Important InfoBanner with warning icon color", async () => {
+    mockIsEncrypted = true
+    render(
+      <ContextForScreen>
+        <CloudBackupScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    const infoBannerMock = InfoBanner as unknown as jest.Mock
+    const props = infoBannerMock.mock.calls[0][0]
+
+    expect(props.icon).toBe("warning")
+    expect(props.iconColor).toBe("warning")
+    expect(props.title).toBe(LL.BackupScreen.CloudBackup.importantTitle())
+  })
+
+  it("renders the hero icon with the green color", async () => {
+    render(
+      <ContextForScreen>
+        <CloudBackupScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    const iconHeroMock = IconHero as unknown as jest.Mock
+    const props = iconHeroMock.mock.calls[0][0]
+
+    expect(props.iconColor).toBe(theme.lightColors?.success)
+    expect(props.icon).toBe("cloud")
+  })
+
+  it("delegates the CloudBackup checkpoint to the migration backup hook", async () => {
+    render(
+      <ContextForScreen>
+        <CloudBackupScreen />
+      </ContextForScreen>,
+    )
+    await flushEffects()
+
+    expect(mockUseMigrationBackupCheckpoint).toHaveBeenCalledWith(
+      MigrationCheckpoint.CloudBackup,
+    )
+  })
+
+  /**
+   * The encryption password is typed here, and PasswordInput's eye toggle shows it in
+   * plain text, so a recents snapshot or a screen recorder would capture it. Guarded from
+   * mount, so the first keystroke never lands on an unguarded frame.
+   */
+  describe("screenshot protection", () => {
+    it("guards the encryption password", async () => {
+      render(
+        <ContextForScreen>
+          <CloudBackupScreen />
+        </ContextForScreen>,
+      )
+      await flushEffects()
+
+      expect(mockAcquireScreenSecurity).toHaveBeenCalledTimes(1)
+    })
+
+    it("drops the guard on unmount", async () => {
+      const { unmount } = render(
+        <ContextForScreen>
+          <CloudBackupScreen />
+        </ContextForScreen>,
+      )
+      await flushEffects()
+
+      unmount()
+
+      expect(mockReleaseScreenSecurity).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe("optional additional encryption", () => {
+    it("backs up without a passphrase unless the user opts in", async () => {
+      await renderScreen()
+
+      expect(mockUseCloudBackup).toHaveBeenLastCalledWith({
+        isEncrypted: false,
+        password: "ValidPass1234!",
+      })
+    })
+
+    it("shows the passphrase fields and warning once encryption is on", async () => {
+      mockIsEncrypted = true
+      const { getByText } = await renderScreen()
+
+      expect(getByText(LL.BackupScreen.CloudBackup.password())).toBeTruthy()
+      expect(getByText(LL.BackupScreen.CloudBackup.confirmPassword())).toBeTruthy()
+      expect(getByText(LL.BackupScreen.CloudBackup.importantTitle())).toBeTruthy()
+      expect(mockUseCloudBackup).toHaveBeenLastCalledWith({
+        isEncrypted: true,
+        password: "ValidPass1234!",
+      })
+    })
+
+    it("keeps continue disabled until an opted-in passphrase is valid", async () => {
+      mockIsEncrypted = true
+      mockIsValid = false
+      const { getByText } = await renderScreen()
+
+      fireEvent.press(getByText(LL.BackupScreen.CloudBackup.continueButton()))
+
+      expect(mockHandleBackup).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("while a backup runs", () => {
+    it("does not start a second backup", async () => {
+      mockLoading = true
+      const { getByTestId } = await renderScreen()
+
+      fireEvent.press(getByTestId("cloud-backup-continue"))
+
+      expect(mockHandleBackup).not.toHaveBeenCalled()
+    })
+
+    /** handleBackup holds the passphrase it started with, so an edit landing
+     *  mid-upload would leave the screen showing one the backup never used. */
+    it("keeps the passphrase fields fixed", async () => {
+      mockIsEncrypted = true
+      mockLoading = true
+      const { getByPlaceholderText } = await renderScreen()
+
+      fireEvent.changeText(
+        getByPlaceholderText(LL.BackupScreen.CloudBackup.passwordPlaceholder()),
+        "a different passphrase",
+      )
+      fireEvent.changeText(
+        getByPlaceholderText(LL.BackupScreen.CloudBackup.confirmPasswordPlaceholder()),
+        "a different passphrase",
+      )
+
+      expect(mockSetPassword).not.toHaveBeenCalled()
+      expect(mockSetConfirmPassword).not.toHaveBeenCalled()
+    })
+
+    it("lets the passphrase be edited once no backup is running", async () => {
+      mockIsEncrypted = true
+      const { getByPlaceholderText } = await renderScreen()
+
+      fireEvent.changeText(
+        getByPlaceholderText(LL.BackupScreen.CloudBackup.passwordPlaceholder()),
+        "a new passphrase",
+      )
+      fireEvent.changeText(
+        getByPlaceholderText(LL.BackupScreen.CloudBackup.confirmPasswordPlaceholder()),
+        "a new passphrase",
+      )
+
+      expect(mockSetPassword).toHaveBeenCalledWith("a new passphrase")
+      expect(mockSetConfirmPassword).toHaveBeenCalledWith("a new passphrase")
+    })
+  })
+})
+
+describe("CloudBackupScreen, the W-D11 gate", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockAcquireScreenSecurity.mockReturnValue({
+      ready: Promise.resolve(),
+      release: mockReleaseScreenSecurity,
+    })
+  })
+
+  afterEach(() => {
+    mockGateOpen = true
+  })
+
+  it("asks again before the upload, with its own prompt", async () => {
+    loadLocale("en")
+    const LL = i18nObject("en")
+
+    const { getByTestId } = await renderScreen()
+
+    expect(mockGateDescription).toHaveBeenCalledWith(
+      LL.BackupScreen.CloudBackup.authDescription(),
+    )
+    expect(getByTestId("cloud-backup-continue")).toBeTruthy()
+  })
+
+  it("never prepares or starts the backup while the gate is refused", async () => {
+    mockGateOpen = false
+
+    const { queryByTestId } = await renderScreen()
+
+    expect(mockUseCloudBackup).not.toHaveBeenCalled()
+    expect(queryByTestId("cloud-backup-continue")).toBeNull()
+    expect(mockHandleBackup).not.toHaveBeenCalled()
+  })
+})

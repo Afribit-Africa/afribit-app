@@ -1,0 +1,65 @@
+import React from "react"
+
+import { useTheme } from "@rn-vui/themed"
+
+import { GaloyPrimaryButton } from "@app/components/atomic/galoy-primary-button"
+import { GaloySecondaryButton } from "@app/components/atomic/galoy-secondary-button"
+import { IconHero } from "@app/components/icon-hero"
+import { CloseHeader } from "@app/components/close-header"
+import { useContactSupport } from "@app/hooks/use-contact-support"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { StepLayout } from "@app/components/step-layout"
+import { testProps } from "@app/utils/testProps"
+
+type MigrationApiServiceScreenProps = {
+  onContinue: () => void
+  onClose?: () => void
+}
+
+export const MigrationApiServiceScreen: React.FC<MigrationApiServiceScreenProps> = ({
+  onContinue,
+  onClose,
+}) => {
+  const { LL } = useI18nContext()
+  const {
+    theme: { colors },
+  } = useTheme()
+  const { openSupport } = useContactSupport()
+
+  /** A step reached with no way out draws the row without the control. */
+  const isCloseHidden = !onClose
+
+  return (
+    <StepLayout
+      headerShown={false}
+      header={
+        <CloseHeader
+          onClose={onClose}
+          isHidden={isCloseHidden}
+          testID="migration-api-close"
+        />
+      }
+      footer={
+        <>
+          <GaloyPrimaryButton
+            title={LL.AccountMigration.apiServiceContinueCta()}
+            onPress={onContinue}
+            {...testProps("migration-api-continue-cta")}
+          />
+          <GaloySecondaryButton
+            title={LL.AccountMigration.apiServiceContactCta()}
+            onPress={openSupport}
+            {...testProps("migration-api-contact-cta")}
+          />
+        </>
+      }
+    >
+      <IconHero
+        icon="key-outline"
+        iconColor={colors.accent}
+        title={LL.AccountMigration.apiServiceTitle()}
+        subtitle={LL.AccountMigration.apiServiceBody()}
+      />
+    </StepLayout>
+  )
+}

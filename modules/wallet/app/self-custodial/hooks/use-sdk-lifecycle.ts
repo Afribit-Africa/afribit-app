@@ -1,0 +1,436 @@
+import { useCallback, useEffect, useRef, useState } from "react"
+import { AppState } from "react-native"
+
+import { type BreezSdkInterface } from "@breeztech/breez-sdk-spark-react-native"
+
+import { useRemoteConfig } from "@app/config/feature-flags-context"
+import { useBackoffRetry } from "@app/hooks/use-backoff-retry"
+import { type NormalizedTransaction } from "@app/types/transaction"
+import { ActiveWalletStatus, type WalletState } from "@app/types/wallet"
+import { reportError } from "@app/utils/error-logging"
+import { logBreadcrumb } from "@app/utils/error-reporting"
+import KeyStoreWrapper from "@app/utils/storage/secureStorage"
+import { withTimeout } from "@app/utils/with-timeout"
+
+import {
+  addSdkEventListener,
+  disconnectSdk,
+  getUserSettings,
+  initSdk,
+  removeSdkEventListener,
+  SdkStorageRetiredError,
+} from "../bridge"
+import { storageDirFor } from "../config"
+import { scopeLostAttemptsTo } from "../payment-details/lost-attempts"
+import { lostAttemptsWalletId } from "../storage/lost-attempts"
+import { logSdkEvent, SdkLogLevel } from "../logging"
+import { measureObservedPayment } from "../measurement"
+import {
+  extractObservedPayment,
+  paymentEventKey,
+  paymentIdFromEventKey,
+  PAYMENT_RECEIVED_EVENTS,
+  REFRESH_EVENTS,
+} from "../providers/sdk-events"
+import { validateStoredNetwork } from "../providers/validate-network"
+import {
+  getOnlineState,
+  getServiceStatus,
+  isDegradedStatus,
+  OnlineState,
+} from "../providers/is-online"
+import {
+  appendTransactions,
+  getSelfCustodialWalletSnapshot,
+  loadMoreTransactions,
+  mergeOrderedTransactions,
+} from "../providers/wallet-snapshot"
+
+import { useLnurlServer } from "./use-lnurl-server"
+import { useSparkNetwork } from "./use-spark-network"
+
+type SdkLifecycleState = {
+  wallets: WalletState[]
+  allTransactions: NormalizedTransaction[]
+  status: ActiveWalletStatus
+  sdk: BreezSdkInterface | null
+  connectedAccountId: string | null
+  sdkStableBalanceActive?: boolean
+  /** `${event tag}:${payment id}` of the last received payment event (see
+   * paymentEventKey); null until one arrives. Tag-aware so a Pending →
+   * Succeeded transition for the same payment is a distinct value. */
+  lastPaymentEventKey: string | null
+  /** The payment id alone, for consumers that look the payment up by id and
+   * must not re-trigger on settlement of an already-seen payment. */
+  lastReceivedPaymentId: string | null
+  hasMoreTransactions: boolean
+  loadingMore: boolean
+  loadMore: () => Promise<void>
+  refreshWallets: () => Promise<void>
+  refreshStableBalanceActive: () => Promise<void>
+}
+
+const OFFLINE_EXEMPT_STATUSES: readonly ActiveWalletStatus[] = [
+  ActiveWalletStatus.Error,
+  ActiveWalletStatus.Unavailable,
+]
+
+const RECONNECT_BACKOFF_MS: readonly number[] = [1000, 3000, 9000]
+export const WALLET_SNAPSHOT_TIMEOUT_MS = 10000
+
+const teardownSdk = async (
+  sdk: BreezSdkInterface,
+  listenerId: string | null,
+): Promise<void> => {
+  if (listenerId) await removeSdkEventListener(sdk, listenerId)
+  await disconnectSdk(sdk)
+}
+
+export const useSdkLifecycle = (
+  activeSelfCustodialAccountId: string | null,
+  retryCount: number,
+): SdkLifecycleState => {
+  const network = useSparkNetwork()
+  const { domain: lnurlDomain } = useLnurlServer()
+  const { selfCustodialDepositClaimLeewayVbyte } = useRemoteConfig()
+  const [wallets, setWallets] = useState<WalletState[]>([])
+  const [allTransactions, setAllTransactions] = useState<NormalizedTransaction[]>([])
+  const [status, setStatus] = useState<ActiveWalletStatus>(ActiveWalletStatus.Unavailable)
+  const [sdkStableBalanceActive, setSdkStableBalanceActive] = useState<boolean>()
+  const [lastPaymentEventKey, setLastPaymentEventKey] = useState<string | null>(null)
+  const [hasMoreTransactions, setHasMoreTransactions] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [sdk, setSdk] = useState<BreezSdkInterface | null>(null)
+  const [connectedAccountId, setConnectedAccountId] = useState<string | null>(null)
+  const sdkRef = useRef<BreezSdkInterface | null>(null)
+  const listenerIdRef = useRef<string | null>(null)
+  const abortRef = useRef(false)
+  const refreshingRef = useRef(false)
+  const pendingRefreshRef = useRef(false)
+  /** Callers waiting for the first refresh iteration that starts at or after
+   *  their call, resolved iteration by iteration — no caller adopts the whole
+   *  drain loop's lifetime (offline, the 10s poll can re-arm it indefinitely). */
+  const refreshWaitersRef = useRef<(() => void)[]>([])
+  const rawTxOffsetRef = useRef(0)
+  /**
+   * The leeway only feeds the SDK config at connect time, so hold it in a ref:
+   * a remote-config change must not tear down and reconnect the live wallet.
+   */
+  const depositClaimLeewayRef = useRef(selfCustodialDepositClaimLeewayVbyte)
+  depositClaimLeewayRef.current = selfCustodialDepositClaimLeewayVbyte
+  const { schedule: scheduleBackoffRetry, reset: resetBackoff } =
+    useBackoffRetry(RECONNECT_BACKOFF_MS)
+
+  // `refreshingRef` linearizes concurrent refreshes (10s poll, AppState change,
+  // SDK events): only one runOnce executes at a time, and any overlapping call
+  // sets `pendingRefreshRef` so the in-flight loop reruns once it returns.
+  // Every caller awaits only the iteration that serves it (refreshWaitersRef):
+  // fresh data before pull-to-refresh retracts, without waiting on the whole
+  // drain loop. The require-atomic-updates disables below (post-await ref
+  // writes) are safe under that invariant.
+  const refreshWallets = useCallback(async () => {
+    const sdk = sdkRef.current
+    if (!sdk) return
+    const settled = new Promise<void>((resolve) => {
+      refreshWaitersRef.current.push(resolve)
+    })
+    if (refreshingRef.current) {
+      // The in-flight do/while below reruns while pendingRefreshRef is set;
+      // this caller's waiter resolves when the rerun serving it completes —
+      // not before any data landed (the spinner would retract on stale
+      // values), and not after the loop's open-ended lifetime either.
+      pendingRefreshRef.current = true
+      await settled
+      return
+    }
+    refreshingRef.current = true
+
+    const isStale = () => sdkRef.current !== sdk
+
+    const runOnce = async () => {
+      try {
+        const snapshot = await withTimeout(
+          getSelfCustodialWalletSnapshot(sdk, rawTxOffsetRef.current),
+          WALLET_SNAPSHOT_TIMEOUT_MS,
+          "wallet snapshot",
+        )
+        if (isStale()) return
+        setWallets(snapshot.wallets)
+        setAllTransactions(snapshot.allTransactions)
+        setHasMoreTransactions(snapshot.hasMore)
+        rawTxOffsetRef.current = snapshot.rawTransactionCount // eslint-disable-line require-atomic-updates
+
+        const serviceStatus = await getServiceStatus()
+        const nextStatus = isDegradedStatus(serviceStatus)
+          ? ActiveWalletStatus.Degraded
+          : ActiveWalletStatus.Ready
+        setStatus(nextStatus)
+        resetBackoff()
+      } catch (err) {
+        logSdkEvent(SdkLogLevel.Error, `Failed to refresh wallets: ${err}`)
+        reportError("Refresh", err)
+        const onlineState = await getOnlineState()
+        if (isStale()) return
+        setStatus((prev) => {
+          if (OFFLINE_EXEMPT_STATUSES.includes(prev)) return prev
+          if (onlineState === OnlineState.Offline) return ActiveWalletStatus.Offline
+          if (onlineState === OnlineState.Unknown) {
+            logBreadcrumb(
+              `[SparkSDK] connectivity check failed; preserving previous status`,
+            )
+            if (prev === ActiveWalletStatus.Loading) return ActiveWalletStatus.Error
+            return prev
+          }
+          if (prev === ActiveWalletStatus.Ready || prev === ActiveWalletStatus.Offline) {
+            return ActiveWalletStatus.Offline
+          }
+          return prev === ActiveWalletStatus.Loading ? ActiveWalletStatus.Error : prev
+        })
+        scheduleBackoffRetry(() => {
+          if (sdkRef.current) refreshWallets()
+        })
+      }
+    }
+
+    // The drain loop runs detached (runOnce never rejects — its catch handles
+    // everything); each iteration serves the waiters registered before it
+    // started, and anyone arriving mid-iteration re-arms pendingRefreshRef to
+    // be served by the next.
+    ;(async () => {
+      try {
+        do {
+          const waiters = refreshWaitersRef.current
+          refreshWaitersRef.current = []
+          pendingRefreshRef.current = false
+          await runOnce()
+          for (const resolve of waiters) resolve()
+        } while (pendingRefreshRef.current)
+      } finally {
+        refreshingRef.current = false // eslint-disable-line require-atomic-updates
+        // Belt and braces: a waiter can only be left behind if the loop exits
+        // abnormally; never strand its caller.
+        const leftover = refreshWaitersRef.current
+        refreshWaitersRef.current = [] // eslint-disable-line require-atomic-updates
+        for (const resolve of leftover) resolve()
+      }
+    })()
+    await settled
+  }, [resetBackoff, scheduleBackoffRetry])
+
+  useEffect(() => {
+    /** All of this belongs to the account it was read for, paging included: the next
+     *  account starts from its own first page, and a page still loading for the previous
+     *  one must not hold its pagination back. */
+    setWallets([])
+    setAllTransactions([])
+    setHasMoreTransactions(false)
+    setLoadingMore(false)
+    rawTxOffsetRef.current = 0
+
+    if (!activeSelfCustodialAccountId) {
+      setStatus(ActiveWalletStatus.Unavailable)
+      return
+    }
+
+    setStatus(ActiveWalletStatus.Loading)
+
+    let mounted = true
+    abortRef.current = false
+    const accountId = activeSelfCustodialAccountId
+
+    const connectAndListen = async (mnemonic: string) => {
+      const connectedSdk = await initSdk({
+        mnemonic,
+        storageDir: storageDirFor(accountId, network),
+        network,
+        leewaySatPerVbyte: depositClaimLeewayRef.current,
+        lnurlDomain,
+      })
+      if (abortRef.current || !mounted) {
+        await teardownSdk(connectedSdk, null)
+        return
+      }
+
+      /** Before any send can see the wallet: lost attempts are its own, not another's. */
+      scopeLostAttemptsTo(lostAttemptsWalletId(accountId, network))
+      sdkRef.current = connectedSdk
+      setSdk(connectedSdk)
+      setConnectedAccountId(accountId)
+
+      const listenerId = await addSdkEventListener(connectedSdk, async (event) => {
+        if (!mounted) return
+
+        /** Ahead of the refresh filter: a failed send is not a refresh event, but it is
+         *  the only word a pending send gets of its failure. Gated to Enhanced inside. */
+        const observedPayment = extractObservedPayment(event)
+        if (observedPayment) measureObservedPayment(observedPayment)
+
+        if (!REFRESH_EVENTS.has(event.tag)) return
+
+        if (PAYMENT_RECEIVED_EVENTS.has(event.tag)) {
+          const eventKey = paymentEventKey(event)
+          if (eventKey) setLastPaymentEventKey(eventKey)
+        }
+        await refreshWallets()
+      })
+      if (abortRef.current || !mounted) {
+        await teardownSdk(connectedSdk, listenerId)
+        return
+      }
+      listenerIdRef.current = listenerId
+
+      refreshWallets()
+
+      getUserSettings(connectedSdk)
+        .then((settings) => {
+          if (mounted) {
+            setSdkStableBalanceActive(settings.stableBalanceActiveLabel !== undefined)
+          }
+        })
+        .catch((err) => {
+          logSdkEvent(SdkLogLevel.Error, `getUserSettings failed: ${err}`)
+        })
+    }
+
+    const initialize = async () => {
+      const stored = await KeyStoreWrapper.readMnemonicWithStatus(accountId)
+      // A keystore that could not answer is not an account without a wallet.
+      // Unavailable is terminal for this account, so scoring a transient
+      // failure as such tells the user their wallet is gone, which Error does
+      // not. Recovery from here is not automatic though: the backoff retry is
+      // armed inside refreshWallets and gated on a live SDK, and this path
+      // never connected one.
+      if (stored.status === "failed") {
+        if (mounted) setStatus(ActiveWalletStatus.Error)
+        return
+      }
+      if (stored.status === "absent") {
+        if (mounted) setStatus(ActiveWalletStatus.Unavailable)
+        return
+      }
+      const mnemonic = stored.value
+
+      const networkValid = await validateStoredNetwork(accountId, network)
+      if (!networkValid) {
+        if (mounted) setStatus(ActiveWalletStatus.Error)
+        return
+      }
+
+      /** The account can change while the mnemonic and network are read: deleting a
+       *  wallet switches away from it first. A cancelled run must not connect at all,
+       *  or it writes the deleted wallet's lines past the log cut. */
+      if (!mounted) return
+      setStatus(ActiveWalletStatus.Loading)
+      await connectAndListen(mnemonic)
+    }
+
+    initialize().catch((err) => {
+      // initSdk refused a wallet that is being deleted; nothing went wrong
+      if (err instanceof SdkStorageRetiredError) return
+      logSdkEvent(SdkLogLevel.Error, `SDK init failed: ${err}`)
+      reportError("SDK init", err)
+      if (mounted) setStatus(ActiveWalletStatus.Error)
+    })
+
+    return () => {
+      mounted = false
+      abortRef.current = true
+      resetBackoff()
+
+      const sdk = sdkRef.current
+      const listenerId = listenerIdRef.current
+      sdkRef.current = null
+      listenerIdRef.current = null
+      setSdk(null)
+      setConnectedAccountId(null)
+
+      if (!sdk) return
+      teardownSdk(sdk, listenerId).catch((err) => {
+        reportError("SDK cleanup", err)
+      })
+    }
+    /* `lnurlDomain` is deliberately out of this array. It is a pure function of
+       `network`, which is in it, so in a release build it cannot change without also
+       changing something that already re-runs this. The one case that would move it
+       alone is the developer outage switch, and tearing down a connected wallet to
+       apply a debug toggle is a worse trade than asking for a reload — which is what
+       the developer screen's control says to do. */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retryCount, refreshWallets, activeSelfCustodialAccountId, resetBackoff, network])
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state !== "active") return
+      refreshWallets().catch((err) => {
+        reportError("AppState refresh", err)
+      })
+    })
+    return () => subscription.remove()
+  }, [refreshWallets])
+
+  useEffect(() => {
+    const CONNECTIVITY_POLL_MS = 10000
+    const interval = setInterval(() => {
+      if (!sdkRef.current) return
+      if (AppState.currentState !== "active") return
+      refreshWallets().catch((err) => {
+        reportError("Polling refresh", err)
+      })
+    }, CONNECTIVITY_POLL_MS)
+    return () => clearInterval(interval)
+  }, [refreshWallets])
+
+  const loadMore = useCallback(async () => {
+    const sdk = sdkRef.current
+    if (!sdk || loadingMore || !hasMoreTransactions) return
+    /** A page asked of a connection that an account switch has since replaced belongs to
+     *  the account the user left: merging it would list that account's payments under the
+     *  new one, and settling it would end a page the new account may be loading itself. */
+    const isStale = () => sdkRef.current !== sdk
+    setLoadingMore(true)
+    try {
+      const result = await loadMoreTransactions(sdk, rawTxOffsetRef.current)
+      if (isStale()) return
+      rawTxOffsetRef.current += result.rawCount
+      setHasMoreTransactions(result.hasMore)
+      setWallets((prev) => appendTransactions(prev, result.transactions))
+      setAllTransactions((prev) => mergeOrderedTransactions(prev, result.transactions))
+    } catch (err) {
+      logSdkEvent(SdkLogLevel.Error, `Failed to load more transactions: ${err}`)
+    } finally {
+      if (!isStale()) setLoadingMore(false)
+    }
+  }, [loadingMore, hasMoreTransactions])
+
+  const refreshStableBalanceActive = useCallback(async () => {
+    if (!sdkRef.current) return
+    try {
+      const settings = await getUserSettings(sdkRef.current)
+      setSdkStableBalanceActive(settings.stableBalanceActiveLabel !== undefined)
+    } catch (err) {
+      logSdkEvent(SdkLogLevel.Error, `Failed to refresh user settings: ${err}`)
+      reportError("Refresh user settings", err)
+    }
+  }, [])
+
+  // Derived, not separate state: equal-by-value ids keep effect deps stable
+  // across a Pending -> Succeeded transition, preserving the id-keyed
+  // consumers' behavior.
+  const lastReceivedPaymentId = paymentIdFromEventKey(lastPaymentEventKey)
+
+  return {
+    wallets,
+    allTransactions,
+    status,
+    sdk,
+    connectedAccountId,
+    sdkStableBalanceActive,
+    lastPaymentEventKey,
+    lastReceivedPaymentId,
+    hasMoreTransactions,
+    loadingMore,
+    loadMore,
+    refreshWallets,
+    refreshStableBalanceActive,
+  }
+}

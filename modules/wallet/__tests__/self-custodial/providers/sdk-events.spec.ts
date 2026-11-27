@@ -1,0 +1,140 @@
+import { SdkEvent_Tags as SdkEventTags } from "@breeztech/breez-sdk-spark-react-native"
+
+import {
+  extractPaymentId,
+  paymentEventKey,
+  paymentIdFromEventKey,
+  REFRESH_EVENTS,
+  PAYMENT_RECEIVED_EVENTS,
+} from "@app/self-custodial/providers/sdk-events"
+
+describe("sdk-events", () => {
+  describe("REFRESH_EVENTS", () => {
+    it("includes Synced for general SDK sync ticks", () => {
+      expect(REFRESH_EVENTS.has(SdkEventTags.Synced)).toBe(true)
+    })
+
+    it("includes PaymentSucceeded so a successful send refreshes wallet state", () => {
+      expect(REFRESH_EVENTS.has(SdkEventTags.PaymentSucceeded)).toBe(true)
+    })
+
+    it("includes PaymentPending so an in-flight payment refreshes wallet state", () => {
+      expect(REFRESH_EVENTS.has(SdkEventTags.PaymentPending)).toBe(true)
+    })
+
+    it("includes ClaimedDeposits so a claim updates the wallets list", () => {
+      expect(REFRESH_EVENTS.has(SdkEventTags.ClaimedDeposits)).toBe(true)
+    })
+
+    it("includes UnclaimedDeposits so the deposit banner updates", () => {
+      expect(REFRESH_EVENTS.has(SdkEventTags.UnclaimedDeposits)).toBe(true)
+    })
+
+    it("includes NewDeposits so newly seen deposits trigger a refresh", () => {
+      expect(REFRESH_EVENTS.has(SdkEventTags.NewDeposits)).toBe(true)
+    })
+
+    it("includes PaymentMetadataUpdated so details that land later reach the history", () => {
+      expect(REFRESH_EVENTS.has(SdkEventTags.PaymentMetadataUpdated)).toBe(true)
+    })
+
+    it("does NOT include PaymentFailed (failed sends should not trigger a refresh)", () => {
+      expect(REFRESH_EVENTS.has(SdkEventTags.PaymentFailed)).toBe(false)
+    })
+
+    it("contains exactly the documented refresh tags (no silent additions)", () => {
+      expect(REFRESH_EVENTS.size).toBe(7)
+    })
+  })
+
+  describe("PAYMENT_RECEIVED_EVENTS", () => {
+    it("includes PaymentSucceeded", () => {
+      expect(PAYMENT_RECEIVED_EVENTS.has(SdkEventTags.PaymentSucceeded)).toBe(true)
+    })
+
+    it("includes PaymentPending (treated as received for UI feedback)", () => {
+      expect(PAYMENT_RECEIVED_EVENTS.has(SdkEventTags.PaymentPending)).toBe(true)
+    })
+
+    it("does NOT include PaymentFailed", () => {
+      expect(PAYMENT_RECEIVED_EVENTS.has(SdkEventTags.PaymentFailed)).toBe(false)
+    })
+
+    it("contains exactly the two documented received-payment tags", () => {
+      expect(PAYMENT_RECEIVED_EVENTS.size).toBe(2)
+    })
+  })
+
+  describe("extractPaymentId", () => {
+    it("extracts id from payment event", () => {
+      const event = {
+        tag: "PaymentSucceeded",
+        inner: { payment: { id: "pay-123" } },
+      }
+
+      expect(extractPaymentId(event)).toBe("pay-123")
+    })
+
+    it("returns null when no inner", () => {
+      expect(extractPaymentId({ tag: "Synced" })).toBeNull()
+    })
+
+    it("returns null when inner has no payment", () => {
+      expect(extractPaymentId({ tag: "Synced", inner: { other: "data" } })).toBeNull()
+    })
+
+    it("returns null when inner is not an object", () => {
+      expect(extractPaymentId({ tag: "Synced", inner: "string" })).toBeNull()
+    })
+  })
+
+  describe("paymentEventKey", () => {
+    it("keys the same payment id differently for Pending and Succeeded", () => {
+      // Settlement changes leaf state, so a Pending -> Succeeded transition
+      // must produce a distinct key or the bundle refresh never reschedules.
+      const pending = paymentEventKey({
+        tag: "PaymentPending",
+        inner: { payment: { id: "pay-123" } },
+      })
+      const succeeded = paymentEventKey({
+        tag: "PaymentSucceeded",
+        inner: { payment: { id: "pay-123" } },
+      })
+
+      expect(pending).toBe("PaymentPending:pay-123")
+      expect(succeeded).toBe("PaymentSucceeded:pay-123")
+      expect(pending).not.toBe(succeeded)
+    })
+
+    it("is stable for a duplicate delivery of the same event", () => {
+      const event = { tag: "PaymentSucceeded", inner: { payment: { id: "pay-1" } } }
+      expect(paymentEventKey(event)).toBe(paymentEventKey(event))
+    })
+
+    it("returns null when the event carries no payment", () => {
+      expect(paymentEventKey({ tag: "Synced" })).toBeNull()
+    })
+  })
+
+  describe("paymentIdFromEventKey", () => {
+    it("recovers the exact payment id even when the id itself contains ':'", () => {
+      // The key format is `${tag}:${id}`; splitting anywhere but the FIRST
+      // colon would corrupt ids like this one.
+      const id = "spark:tx:0123abc"
+      const key = paymentEventKey({ tag: "PaymentSucceeded", inner: { payment: { id } } })
+      expect(paymentIdFromEventKey(key)).toBe(id)
+    })
+
+    it("round-trips a plain id", () => {
+      const key = paymentEventKey({
+        tag: "PaymentPending",
+        inner: { payment: { id: "pay-1" } },
+      })
+      expect(paymentIdFromEventKey(key)).toBe("pay-1")
+    })
+
+    it("returns null for a null key", () => {
+      expect(paymentIdFromEventKey(null)).toBeNull()
+    })
+  })
+})

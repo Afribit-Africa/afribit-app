@@ -1,0 +1,162 @@
+import * as React from "react"
+import ContentLoader, { Rect } from "react-content-loader/native"
+import { Pressable, TouchableOpacity, View, Text } from "react-native"
+
+import { makeStyles } from "@rn-vui/themed"
+
+import { HiddenBalancePlaceholder } from "@app/components/hidden-balance-placeholder/hidden-balance-placeholder"
+import { useHideAmount } from "@app/graphql/hide-amount-context"
+import { BalanceMode } from "@app/hooks/use-balance-mode"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { MAX_FONT_SIZE_MULTIPLIER } from "@app/rne-theme/text-scaling"
+import { testProps } from "@app/utils/testProps"
+import { fonts } from "@app/rne-theme/fonts"
+
+const Loader = () => {
+  const styles = useStyles()
+  return (
+    <ContentLoader
+      height={40}
+      width={100}
+      speed={1.2}
+      backgroundColor={styles.loaderBackground.color}
+      foregroundColor={styles.loaderForefound.color}
+      viewBox="0 0 100 40"
+    >
+      <Rect x="0" y="0" rx="4" ry="4" width="100" height="40" />
+    </ContentLoader>
+  )
+}
+
+type Props = {
+  loading: boolean
+  formattedBalance?: string
+  showStableBalanceToggle?: boolean
+  mode?: BalanceMode
+  onModeChange?: () => void
+  /** The amount above is in sats because nothing could price it. Said out loud so a
+   *  balance that changes denomination does not read as money changing. */
+  isSatsOnly?: boolean
+}
+
+export const BalanceHeader: React.FC<Props> = ({
+  loading,
+  formattedBalance,
+  showStableBalanceToggle,
+  mode,
+  onModeChange,
+  isSatsOnly = false,
+}) => {
+  const styles = useStyles()
+  const { LL } = useI18nContext()
+
+  const { hideAmount, toggleHideAmount } = useHideAmount()
+  const currentMode = mode ?? BalanceMode.Btc
+
+  const modeLabel =
+    currentMode === BalanceMode.Btc
+      ? LL.StableBalance.balanceLabelBtc()
+      : LL.StableBalance.balanceLabelUsd()
+
+  return (
+    <View {...testProps("balance-header")} style={styles.balanceHeaderContainer}>
+      {hideAmount ? (
+        <TouchableOpacity style={styles.balanceWrapper} onPress={toggleHideAmount}>
+          <HiddenBalancePlaceholder size="large" />
+        </TouchableOpacity>
+      ) : (
+        <TouchableOpacity onPress={toggleHideAmount}>
+          <View style={styles.amountWrapper}>
+            {loading ? (
+              <Loader />
+            ) : (
+              // One line, shrunk to fit. Android also shrinks against amountWrapper's
+              // fixed height; the line limit keeps that from resting on the height.
+              <Text
+                {...testProps("balance-value")}
+                style={styles.primaryBalanceText}
+                allowFontScaling
+                maxFontSizeMultiplier={MAX_FONT_SIZE_MULTIPLIER}
+                adjustsFontSizeToFit
+                numberOfLines={1}
+              >
+                {formattedBalance}
+              </Text>
+            )}
+          </View>
+        </TouchableOpacity>
+      )}
+      {isSatsOnly && !hideAmount && !loading ? (
+        <Text
+          maxFontSizeMultiplier={MAX_FONT_SIZE_MULTIPLIER}
+          style={styles.satsOnlyText}
+          {...testProps("balance-rate-notice")}
+        >
+          {LL.SelfCustodialStaleRate.satsOnly()}
+        </Text>
+      ) : null}
+      {showStableBalanceToggle && onModeChange ? (
+        <Pressable
+          onPress={onModeChange}
+          accessibilityRole="button"
+          style={styles.modeToggle}
+          {...testProps("balance-mode-toggle")}
+        >
+          <Text
+            maxFontSizeMultiplier={MAX_FONT_SIZE_MULTIPLIER}
+            style={styles.modeToggleText}
+          >
+            {modeLabel}
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  balanceHeaderContainer: {
+    alignItems: "center",
+    textAlign: "center",
+  },
+  balanceWrapper: {
+    height: 48,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  amountWrapper: {
+    height: 48,
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "center",
+  },
+  primaryBalanceText: {
+    fontSize: 32,
+    fontFamily: fonts.bold,
+    color: colors.textOnBackground,
+  },
+  loaderBackground: {
+    color: colors.loaderBackground,
+  },
+  loaderForefound: {
+    color: colors.loaderForeground,
+  },
+  satsOnlyText: {
+    fontFamily: fonts.regular,
+    marginTop: 4,
+    fontSize: 12,
+    textAlign: "center",
+    color: colors.textMuted,
+  },
+  modeToggle: {
+    marginTop: 4,
+    paddingVertical: 2,
+    paddingHorizontal: 8,
+  },
+  modeToggleText: {
+    fontSize: 11,
+    fontFamily: fonts.bold,
+    color: colors.textMuted,
+    letterSpacing: 0.6,
+  },
+}))

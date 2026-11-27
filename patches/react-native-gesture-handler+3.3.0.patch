@@ -1,0 +1,73 @@
+diff --git a/node_modules/react-native-gesture-handler/lib/module/handlers/gestures/installUIRuntimeBindings.js b/node_modules/react-native-gesture-handler/lib/module/handlers/gestures/installUIRuntimeBindings.js
+index 7f568a2..4afd346 100644
+--- a/node_modules/react-native-gesture-handler/lib/module/handlers/gestures/installUIRuntimeBindings.js
++++ b/node_modules/react-native-gesture-handler/lib/module/handlers/gestures/installUIRuntimeBindings.js
+@@ -1,9 +1,13 @@
+ "use strict";
+ 
+ import { ghQueueMicrotask } from '../../ghQueueMicrotask';
+-import { tagMessage } from '../../utils';
++import { isTestEnv, tagMessage } from '../../utils';
+ import { NativeProxy } from '../../v3/NativeProxy';
+ export function installUIRuntimeBindings(getUIRuntimeHolder) {
++  // Jest runs worklets' web build, which has no UI runtime.
++  if (isTestEnv()) {
++    return;
++  }
+   ghQueueMicrotask(() => {
+     globalThis.__RNGH_UI_WORKLET_RUNTIME_HOLDER = getUIRuntimeHolder?.();
+     try {
+diff --git a/node_modules/react-native-gesture-handler/lib/module/v3/detectors/useEnsureGestureHandlerRootView.js b/node_modules/react-native-gesture-handler/lib/module/v3/detectors/useEnsureGestureHandlerRootView.js
+index 39d0a31..9862b93 100644
+--- a/node_modules/react-native-gesture-handler/lib/module/v3/detectors/useEnsureGestureHandlerRootView.js
++++ b/node_modules/react-native-gesture-handler/lib/module/v3/detectors/useEnsureGestureHandlerRootView.js
+@@ -3,9 +3,10 @@
+ import { use } from 'react';
+ import { Platform } from 'react-native';
+ import GestureHandlerRootViewContext from '../../GestureHandlerRootViewContext';
++import { isTestEnv } from '../../utils';
+ export function useEnsureGestureHandlerRootView() {
+   const rootViewContext = use(GestureHandlerRootViewContext);
+-  if (__DEV__ && !rootViewContext && Platform.OS !== 'web') {
++  if (__DEV__ && !rootViewContext && !isTestEnv() && Platform.OS !== 'web') {
+     throw new Error('GestureDetector must be used as a descendant of GestureHandlerRootView. Otherwise the gestures will not be recognized. See https://docs.swmansion.com/react-native-gesture-handler/docs/fundamentals/installation for more details.');
+   }
+ }
+diff --git a/node_modules/react-native-gesture-handler/src/handlers/gestures/installUIRuntimeBindings.ts b/node_modules/react-native-gesture-handler/src/handlers/gestures/installUIRuntimeBindings.ts
+index 16ebc5c..3c981ca 100644
+--- a/node_modules/react-native-gesture-handler/src/handlers/gestures/installUIRuntimeBindings.ts
++++ b/node_modules/react-native-gesture-handler/src/handlers/gestures/installUIRuntimeBindings.ts
+@@ -1,10 +1,14 @@
+ import { ghQueueMicrotask } from '../../ghQueueMicrotask';
+-import { tagMessage } from '../../utils';
++import { isTestEnv, tagMessage } from '../../utils';
+ import { NativeProxy } from '../../v3/NativeProxy';
+ 
+ export function installUIRuntimeBindings(
+   getUIRuntimeHolder: (() => object) | undefined
+ ) {
++  // Jest runs worklets' web build, which has no UI runtime.
++  if (isTestEnv()) {
++    return;
++  }
+   ghQueueMicrotask(() => {
+     globalThis.__RNGH_UI_WORKLET_RUNTIME_HOLDER = getUIRuntimeHolder?.();
+ 
+diff --git a/node_modules/react-native-gesture-handler/src/v3/detectors/useEnsureGestureHandlerRootView.ts b/node_modules/react-native-gesture-handler/src/v3/detectors/useEnsureGestureHandlerRootView.ts
+index abb9c42..21bfd7c 100644
+--- a/node_modules/react-native-gesture-handler/src/v3/detectors/useEnsureGestureHandlerRootView.ts
++++ b/node_modules/react-native-gesture-handler/src/v3/detectors/useEnsureGestureHandlerRootView.ts
+@@ -2,11 +2,12 @@ import { use } from 'react';
+ import { Platform } from 'react-native';
+ 
+ import GestureHandlerRootViewContext from '../../GestureHandlerRootViewContext';
++import { isTestEnv } from '../../utils';
+ 
+ export function useEnsureGestureHandlerRootView() {
+   const rootViewContext = use(GestureHandlerRootViewContext);
+ 
+-  if (__DEV__ && !rootViewContext && Platform.OS !== 'web') {
++  if (__DEV__ && !rootViewContext && !isTestEnv() && Platform.OS !== 'web') {
+     throw new Error(
+       'GestureDetector must be used as a descendant of GestureHandlerRootView. Otherwise the gestures will not be recognized. See https://docs.swmansion.com/react-native-gesture-handler/docs/fundamentals/installation for more details.'
+     );

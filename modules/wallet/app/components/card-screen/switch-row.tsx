@@ -1,0 +1,63 @@
+import React from "react"
+import { ListItem, makeStyles } from "@rn-vui/themed"
+
+import { Switch } from "@app/components/atomic/switch"
+import { fonts } from "@app/rne-theme/fonts"
+
+type SwitchRowProps = {
+  title: string
+  description?: string
+  value?: boolean
+  onValueChange?: (value: boolean) => void
+  disabled?: boolean
+}
+
+export const SwitchRow: React.FC<SwitchRowProps> = ({
+  title,
+  description,
+  value = false,
+  onValueChange = () => {},
+  disabled = false,
+}) => {
+  const styles = useStyles()
+  return (
+    <ListItem containerStyle={styles.listItemContainer}>
+      <ListItem.Content>
+        <ListItem.Title style={styles.listItemTitle}>{title}</ListItem.Title>
+        {description && (
+          <ListItem.Subtitle style={styles.listItemSubtitle}>
+            {description}
+          </ListItem.Subtitle>
+        )}
+      </ListItem.Content>
+      <Switch
+        value={value}
+        onValueChange={onValueChange}
+        disabled={disabled}
+        accessibilityLabel={title}
+      />
+    </ListItem>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  listItemContainer: {
+    backgroundColor: colors.transparent,
+    paddingVertical: 14,
+    paddingLeft: 14,
+    paddingRight: 10,
+    minHeight: 0,
+  },
+  listItemTitle: {
+    color: colors.textOnBackground,
+    fontSize: 14,
+    lineHeight: 20,
+    fontFamily: fonts.regular,
+  },
+  listItemSubtitle: {
+    color: colors.textMuted,
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    lineHeight: 16,
+  },
+}))

@@ -1,0 +1,301 @@
+import React, { useState } from "react"
+import { ActivityIndicator, Pressable, TextInput, View } from "react-native"
+import { MAX_FONT_SIZE_MULTIPLIER } from "@app/rne-theme/text-scaling"
+
+import { makeStyles, Text, useTheme } from "@rn-vui/themed"
+
+import { radius } from "@app/rne-theme/radius"
+import { GaloyIcon } from "@app/components/atomic/galoy-icon"
+import { GaloyTertiaryButton } from "@app/components/atomic/galoy-tertiary-button"
+import { CheckboxRow } from "@app/components/checkbox-row"
+import { Screen } from "@app/components/screen"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { useSparkNetwork } from "@app/self-custodial/hooks/use-spark-network"
+import { useSelfCustodialWallet } from "@app/self-custodial/providers/wallet"
+import { DepositStatus } from "@app/types/payment"
+import { testProps } from "@app/utils/testProps"
+import { fonts } from "@app/rne-theme/fonts"
+
+import {
+  buildFeeTierOptions,
+  feeTierLabels,
+} from "../send-bitcoin-screen/fee-tier-options"
+import { FeeTierOption } from "../send-bitcoin-screen/hooks/fee-tiers.types"
+
+import { DepositErrorMessage } from "./deposit-error-message"
+import { useDepositActions } from "./hooks/use-deposit-actions"
+import {
+  getFeeRateSatPerVb,
+  useRecommendedFeeTiers,
+} from "./hooks/use-recommended-fee-tiers"
+import { addressPlaceholderFor, openMempoolTx } from "./utils"
+
+export const UnclaimedDepositsScreen: React.FC = () => {
+  const styles = useStyles()
+  const {
+    theme: { colors },
+  } = useTheme()
+  const { LL, locale } = useI18nContext()
+  const { sdk } = useSelfCustodialWallet()
+  const network = useSparkNetwork()
+
+  const { deposits, isBusy, isProcessing, handleClaim, handleRefund, DepositActionType } =
+    useDepositActions()
+
+  const [refundDepositId, setRefundDepositId] = useState<string | null>(null)
+  const [refundAddress, setRefundAddress] = useState("")
+  const [feeTier, setFeeTier] = useState<FeeTierOption>(FeeTierOption.Medium)
+
+  const {
+    tiers: feeTiers,
+    error: feeTiersError,
+    hasQuote: hasFeeRateQuote,
+  } = useRecommendedFeeTiers(sdk ?? null, refundDepositId !== null)
+  const feeTierOptions = buildFeeTierOptions({
+    hasQuote: hasFeeRateQuote,
+    tiers: feeTiers,
+    labels: feeTierLabels(LL),
+    formatFee: ({ feeAmount }) => LL.UnclaimedDeposit.feeRateUnit({ rate: feeAmount }),
+    locale,
+  })
+
+  const isRefundMode = refundDepositId !== null
+  const hasAddress = refundAddress.trim().length > 0
+  const selectedFeeRate = feeTiers[feeTier].feeAmount
+  const hasFeeRateError = feeTiersError !== null
+  const isFeeRateBroadcastable = selectedFeeRate > 0
+  /**
+   * The quote gate stops a rate the labels never showed from being submitted; the rate
+   * itself still has to be one the network would accept.
+   */
+  const canSubmitRefund =
+    hasAddress && !hasFeeRateError && hasFeeRateQuote && isFeeRateBroadcastable
+  const isRefundSubmitDisabled = !canSubmitRefund || isBusy
+  const isClaimDisabled = isBusy || isRefundMode
+
+  const resetRefund = () => {
+    setRefundDepositId(null)
+    setRefundAddress("")
+    setFeeTier(FeeTierOption.Medium)
+  }
+
+  const onRefund = async (depositId: string) => {
+    const deposit = deposits.find(({ id }) => id === depositId)
+    if (!deposit) return
+
+    const rates = getFeeRateSatPerVb(feeTiers)
+    const success = await handleRefund(deposit, refundAddress.trim(), rates[feeTier])
+    if (success) resetRefund()
+  }
+
+  return (
+    <Screen preset="scroll">
+      <View style={styles.content}>
+        {deposits.length === 0 && (
+          <Text style={styles.emptyText}>{LL.UnclaimedDeposit.error()}</Text>
+        )}
+
+        {deposits.map((deposit) => {
+          const isRefunding = refundDepositId === deposit.id
+
+          return (
+            <View key={deposit.id} style={styles.card}>
+              <Text style={styles.cardTitle}>
+                {LL.UnclaimedDeposit.cardTitle({
+                  sats: deposit.amount.amount.toLocaleString(),
+                })}
+              </Text>
+
+              <Pressable
+                style={styles.txRow}
+                onPress={() => openMempoolTx(deposit.txid, network)}
+              >
+                <Text style={styles.txLink} numberOfLines={1} ellipsizeMode="middle">
+                  {deposit.txid}
+                </Text>
+                <GaloyIcon name="link" size={12} color={colors.accent} />
+              </Pressable>
+
+              {deposit.status === DepositStatus.Immature && (
+                <Text style={styles.mutedText}>{LL.UnclaimedDeposit.immature()}</Text>
+              )}
+
+              {/** Claimed early: the provider has it, so neither claim nor refund applies. */}
+              {deposit.status === DepositStatus.Claiming && (
+                <Text style={styles.mutedText}>{LL.UnclaimedDeposit.claiming()}</Text>
+              )}
+
+              {deposit.status !== DepositStatus.Immature &&
+                deposit.status !== DepositStatus.Claiming &&
+                !isRefunding && (
+                  <View style={styles.actions}>
+                    {isProcessing(deposit.id, DepositActionType.Claim) ? (
+                      <ActivityIndicator size="small" color={colors.accent} />
+                    ) : (
+                      <GaloyTertiaryButton
+                        title={LL.UnclaimedDeposit.claim()}
+                        onPress={() => handleClaim(deposit)}
+                        disabled={isClaimDisabled}
+                        {...testProps(`claim-${deposit.id}`)}
+                      />
+                    )}
+                    <GaloyTertiaryButton
+                      title={LL.UnclaimedDeposit.refund()}
+                      outline
+                      onPress={() => setRefundDepositId(deposit.id)}
+                      disabled={isBusy}
+                      {...testProps(`refund-toggle-${deposit.id}`)}
+                    />
+                  </View>
+                )}
+
+              {isRefunding && (
+                <View style={styles.refundPanel}>
+                  <View>
+                    <Text style={styles.fieldLabel}>
+                      {LL.UnclaimedDeposit.refundAddress()}
+                    </Text>
+                    <View style={styles.fieldInput}>
+                      <TextInput
+                        maxFontSizeMultiplier={MAX_FONT_SIZE_MULTIPLIER}
+                        style={styles.fieldInputText}
+                        placeholder={addressPlaceholderFor(network)}
+                        placeholderTextColor={colors.textMuted}
+                        value={refundAddress}
+                        onChangeText={setRefundAddress}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        {...testProps("refund-address-input")}
+                      />
+                    </View>
+                  </View>
+
+                  <View>
+                    <Text style={styles.fieldLabel}>{LL.UnclaimedDeposit.feeRate()}</Text>
+                    <View style={styles.fieldGroup}>
+                      {feeTierOptions.map(({ id, label, detail }) => (
+                        <CheckboxRow
+                          key={id}
+                          label={`${label} ${detail}`}
+                          isChecked={feeTier === id}
+                          onPress={() => setFeeTier(id as FeeTierOption)}
+                        />
+                      ))}
+                    </View>
+                    {hasFeeRateError && (
+                      <Text style={styles.errorText}>
+                        {LL.UnclaimedDeposit.feeRateUnavailable()}
+                      </Text>
+                    )}
+                  </View>
+
+                  <View style={styles.actions}>
+                    <GaloyTertiaryButton
+                      title={LL.common.cancel()}
+                      outline
+                      onPress={resetRefund}
+                      disabled={isBusy}
+                      {...testProps("cancel-refund")}
+                    />
+                    {isProcessing(deposit.id, DepositActionType.Refund) ? (
+                      <ActivityIndicator size="small" color={colors.accent} />
+                    ) : (
+                      <GaloyTertiaryButton
+                        title={LL.UnclaimedDeposit.refundNow()}
+                        onPress={() => onRefund(deposit.id)}
+                        disabled={isRefundSubmitDisabled}
+                        {...testProps("refund-now-button")}
+                      />
+                    )}
+                  </View>
+                </View>
+              )}
+
+              <DepositErrorMessage deposit={deposit} />
+            </View>
+          )
+        })}
+      </View>
+    </Screen>
+  )
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  content: {
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 30,
+    gap: 16,
+  },
+  emptyText: {
+    textAlign: "center",
+    color: colors.textMuted,
+    marginTop: 40,
+  },
+  card: {
+    backgroundColor: colors.surfaceInteractive,
+    borderRadius: radius.default,
+    padding: 20,
+    gap: 14,
+  },
+  cardTitle: {
+    fontSize: 16,
+    fontFamily: fonts.bold,
+    color: colors.textOnBackground,
+  },
+  txRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+  txLink: {
+    fontSize: 12,
+    color: colors.accent,
+    fontFamily: fonts.regular,
+    flex: 1,
+  },
+  mutedText: {
+    fontSize: 12,
+    color: colors.textMuted,
+  },
+  errorText: {
+    fontSize: 12,
+    color: colors.error,
+    marginTop: 8,
+  },
+  actions: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  refundPanel: {
+    gap: 14,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: colors.neutral,
+  },
+  fieldLabel: {
+    fontSize: 13,
+    fontFamily: fonts.bold,
+    color: colors.textMuted,
+    marginBottom: 8,
+  },
+  fieldInput: {
+    backgroundColor: colors.backgroundDefault,
+    borderRadius: radius.default,
+    paddingHorizontal: 14,
+    minHeight: 48,
+    justifyContent: "center",
+  },
+  fieldInputText: {
+    fontSize: 14,
+    color: colors.textOnBackground,
+    fontFamily: fonts.regular,
+  },
+  fieldGroup: {
+    backgroundColor: colors.backgroundDefault,
+    borderRadius: radius.default,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 12,
+  },
+}))

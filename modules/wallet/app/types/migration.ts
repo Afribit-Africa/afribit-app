@@ -1,0 +1,256 @@
+/**
+ * Shape of the backend migration preview (the authed top-level Query.migration.preview):
+ * the server computes the network fee, whether Blink covers it, and the resulting amount.
+ * The client renders these four fields verbatim and never does the arithmetic itself.
+ */
+export type AccountMigrationPreview = {
+  balanceSats: number
+  feeSats: number
+  feeCoveredByBlink: boolean
+  receiveSats: number
+}
+
+/** The backend rejection codes the migration reads off a mutation payload: a server
+ *  contract rather than one hook's detail, so a rename lands in a single place. */
+export const MigrationRejectionCode = {
+  /** Refused while a transfer is still draining. Transient by contract. */
+  StateConflict: "MIGRATION_STATE_CONFLICT",
+  /** The phone-deletion cap, carrying the server's own contact-support copy. */
+  OperationRestricted: "OPERATION_RESTRICTED",
+  /** A stale proof and a bad destination share this code; the clock skew tells them apart. */
+  InvalidDestination: "MIGRATION_INVALID_DESTINATION",
+  /** Refused while an incoming on-chain deposit has not confirmed. Transient: it clears
+   *  once the deposit lands, so it earns a retry rather than support. */
+  PendingDeposit: "MIGRATION_PENDING_DEPOSIT",
+} as const
+
+export type MigrationRejectionCode =
+  (typeof MigrationRejectionCode)[keyof typeof MigrationRejectionCode]
+
+/** What a check for an on-chain deposit still confirming answered. */
+export const PendingDepositCheckStatus = {
+  Clear: "clear",
+  Pending: "pending",
+  /** The check said neither: its request failed, or it answered without the list. */
+  Unknown: "unknown",
+} as const
+
+export type PendingDepositCheckStatus =
+  (typeof PendingDepositCheckStatus)[keyof typeof PendingDepositCheckStatus]
+
+/** Unknown carries the request's error, null when it answered without the list, so a
+ *  caller that reports failures reports the same one the request raised. */
+export type PendingDepositCheck =
+  | { status: typeof PendingDepositCheckStatus.Clear }
+  | { status: typeof PendingDepositCheckStatus.Pending }
+  | { status: typeof PendingDepositCheckStatus.Unknown; error: Error | null }
+
+/**
+ * Why the migration handed the user to support. Deliberately NOT translated: the value is
+ * copied out of an email by a human, so it has to stay greppable whatever locale produced
+ * the ticket, and only its label is localized.
+ */
+export const MigrationSupportReason = {
+  /** The server answered but had no preview to give. */
+  PreviewUnavailable: "preview-unavailable",
+  /** The wallet query settled without balances, so the dollar row has nothing to show. */
+  BalancesUnavailable: "balances-unavailable",
+  /** The server refused to open the migration flow (cohort, dollars, state conflict). */
+  StartRefused: "start-refused",
+  /** The checkpoint reached the transfer with no provisioned self-custodial account. */
+  SelfCustodialAccountMissing: "self-custodial-account-missing",
+  /** The commit screen settled without the custodial owner id the lightning-address
+   *  re-point signs its proof against (the session is no longer custodial, or the owner
+   *  query answered with nothing). The re-point cannot fire at all without it, so it is a
+   *  settled failure rather than a wait that resolves itself. */
+  CustodialOwnerMissing: "custodial-owner-missing",
+  /** The migration finished server-side, but the destination self-custodial account is no
+   *  longer on this device (its key is gone, e.g. after a reinstall), so the resume swap
+   *  cannot run and no retry brings it back. */
+  SelfCustodialAccountNotOnDevice: "self-custodial-account-not-on-device",
+  /** The server has this account locked mid-migration, but the device holds neither a
+   *  resumable checkpoint nor a reusable pending wallet (e.g. after a reinstall), so a
+   *  restart would only provision another orphan; support is the only way forward. */
+  LockedWithoutCheckpoint: "locked-without-checkpoint",
+  /** The device store would not answer, so whether this account can resume is unknown
+   *  rather than settled — told apart from the reason above on purpose, since that one
+   *  asserts the records are gone and this one asserts nothing. The records may well be
+   *  intact and unread, so support must not treat it as a wiped device. */
+  StorageUnreadable: "storage-unreadable",
+  /** The same store failure as above, but one the device named as a full disk: the user
+   *  was told to free up space, so the ticket says so too. Kept apart because support
+   *  answers it with a remedy the user can apply, where the code above has none. */
+  StorageOutOfSpace: "storage-out-of-space",
+  /** The transfer itself failed or threw. */
+  TransferFailed: "transfer-failed",
+  /** The server paid the migration out, but the receive into the new self-custodial
+   *  wallet stayed unconfirmed past the notice window — the funds look stuck in transit. */
+  ReceiveDelayed: "receive-delayed",
+  /** An incoming on-chain deposit still confirming holds the migration, and the user asked
+   *  for help from the modal that says so: a low fee can leave it unconfirmed for days. */
+  DepositPending: "deposit-pending",
+  /** The proof the lightning-address re-point signs could not be built on this device: the
+   *  SDK answered with a failure, or the keychain threw. The commit signs the same proof
+   *  through the same chain, so it would fail moments later — this is the one re-point
+   *  outcome the migration cannot carry on past. An address the server merely refused is
+   *  not: the funds move regardless and the commit screen says so. */
+  LnAddressTransferFailed: "ln-address-transfer-failed",
+  /** The server refused to close the emptied custodial account for good (the phone-deletion
+   *  cap). The migration itself finished; the account stays open until support removes it. */
+  CustodialAccountCloseRefused: "custodial-account-close-refused",
+  /** The server answered with a migration phase this build does not know (its enum grew
+   *  without an app release). Nothing on the device can act on it and asking again gets
+   *  the same answer, so support takes over rather than an endless "try again". */
+  StatusUnrecognised: "status-unrecognised",
+  /** The funds landed, but finishing on this device threw: the session discard, the
+   *  checkpoint clear or the pending-wallet write. Distinct from a transfer failure so
+   *  support does not go looking for money that never moved. */
+  CompletionFailed: "completion-failed",
+  /** The support screen was reached without a reason, e.g. after a navigation-state
+   *  restore; a named fallback so the ticket is never blank and never a bare string. */
+  Unknown: "unknown",
+} as const
+
+export type MigrationSupportReason =
+  (typeof MigrationSupportReason)[keyof typeof MigrationSupportReason]
+
+/**
+ * Reasons worth telling the user to restart the app for, rather than leading with support.
+ * The start latch is in-memory only, so a relaunch sends a fresh `migrationStart`: a refusal
+ * that was transient (a state conflict, a dollar balance the gate now asks them to empty)
+ * clears itself, and the user starts the migration again from the intro. Nothing resumes on
+ * its own — the gate's resume path needs a server-side lock, which a refused start never
+ * armed.
+ *
+ * Only a SUBSET of `start-refused` is actually restart-resolvable: the backend maps its
+ * permanent rejections (a cohort exclusion) onto the same MIGRATION_STATE_CONFLICT code as a
+ * transient conflict, so the client cannot tell them apart. Those users spend one restart
+ * before the copy's "still seeing this screen?" line sends them to support, which is the
+ * accepted trade-off for deflecting the transient majority. A distinct backend code for
+ * permanent refusals would let them keep the support-first copy.
+ *
+ * Lives next to the taxonomy so adding a reason above is decided in the same place.
+ */
+export const RESTART_RESOLVABLE_REASONS: ReadonlySet<MigrationSupportReason> = new Set([
+  MigrationSupportReason.StartRefused,
+])
+
+/**
+ * Where the support screen was opened from, which decides its Back target. The commit flow
+ * has the commit point (Step 8) underneath, so Back returns there, skipping the
+ * back-swallowing transfer screen. The resume handover is pushed from the root navigator
+ * with no migration screens beneath it, so Back dismisses to where it came from rather than
+ * fabricating a fresh commit screen over an already-completed migration. The gate handover
+ * has nothing behind it at all — the gate underneath would only replay the handover — so
+ * support becomes the terminal screen with no Back.
+ */
+export const MigrationSupportOrigin = {
+  Commit: "commit",
+  Resume: "resume",
+  Gate: "gate",
+  /** A gate handover the gate itself can still resolve: unlike the one above, it is only
+   *  offered after retries have failed, so returning lands on a retry screen rather than
+   *  on a handover that fires again. The user who frees up space needs that way back. */
+  GateStorage: "gate-storage",
+  /** The only handover the transfer is expected to survive: the receive is still being
+   *  watched underneath, so backing out returns to the screen watching it rather than
+   *  popping to the commit screen, which would unmount the gate with it. */
+  ReceiveDelayed: "receive-delayed",
+  /** Raised by the commit path after it resets the stack with Home underneath, so Back
+   *  returns there rather than fabricating a commit screen for a finished migration. */
+  CloseRefused: "close-refused",
+} as const
+
+export type MigrationSupportOrigin =
+  (typeof MigrationSupportOrigin)[keyof typeof MigrationSupportOrigin]
+
+/**
+ * How the lightning-address re-point onto the migrated account ended: one value rather than
+ * a bag of booleans, because the kinds are mutually exclusive and each earns a different
+ * answer from the commit screen.
+ *
+ * The line that matters runs between a proof that could not be BUILT and an address the
+ * server REFUSED. The commit signs the same proof through the same SDK chain, so a proof
+ * failure is a failure the commit shares and the migration cannot promise past. A refusal
+ * is the address alone: the funds move regardless, so the screen says the address did not
+ * move and lets the commit through rather than stranding the user at the point of no return
+ * (blink-wip#1211).
+ */
+export const MigrationLnAddressOutcome = {
+  /** Nothing has answered yet: an attempt is in flight, or none fired for want of an id. */
+  Pending: "pending",
+  /** Every identifier settled: moved, already moved, or nothing to move. */
+  Transferred: "transferred",
+  /** The network never delivered the attempt, so a retry can still land. */
+  ConnectionIssue: "connection-issue",
+  /** No device key for the account (a reinstall), the same cause the commit reports. */
+  AccountMissing: "account-missing",
+  /** The address did not move and a retry would only replay the same answer: the server
+   *  refused it, or answered without moving it. The commit's own proof is unaffected. */
+  Rejected: "rejected",
+  /** The proof could not be built on this device, which breaks the commit too. */
+  ProofFailed: "proof-failed",
+} as const
+
+export type MigrationLnAddressOutcome =
+  (typeof MigrationLnAddressOutcome)[keyof typeof MigrationLnAddressOutcome]
+
+/**
+ * How an attempt to finish a migration ended. Closing the emptied custodial account has
+ * exactly one window: the session discard that follows destroys the only token that can
+ * authenticate the deletion. So an unsettled close finishes nothing and keeps the session
+ * and the checkpoint for a retry, while a settled refusal finishes everything and leaves
+ * the account itself to support.
+ */
+export const MigrationCompletion = {
+  Completed: "completed",
+  /** No provisioned self-custodial account on this device, so there is nothing to swap to. */
+  AccountMissing: "account-missing",
+  CloseUnavailable: "close-unavailable",
+  CloseRefused: "close-refused",
+} as const
+
+export type MigrationCompletion =
+  (typeof MigrationCompletion)[keyof typeof MigrationCompletion]
+
+/**
+ * What the server says about the migration a commit-point checkpoint belongs to, reduced
+ * to the four answers the routing acts on differently. The checkpoint only knows WHICH
+ * screen the device left off on; this says WHETHER that is still where the user belongs.
+ */
+export const ServerMigrationFlow = {
+  /** In progress, transferring, or failed: the flow is still open, and resumes. */
+  Open: "open",
+  /** No migration, because none started or support cleared a stuck one: start over. */
+  NotStarted: "not-started",
+  /** The server moved the funds and this device has yet to swap into the new wallet. The
+   *  background resume finishes that on its own, so the flow is neither resumed (the
+   *  server refuses to start it again) nor restarted (that would drop the figure the swap
+   *  waits on). */
+  Completed: "completed",
+  /** No answer to act on: the read failed, never ran, or is still on its way. */
+  Unanswered: "unanswered",
+  /** An answer, but a phase this build does not know. Unlike the one above it never
+   *  changes by asking again, so it is kept apart rather than held on forever. */
+  Unrecognised: "unrecognised",
+} as const
+
+export type ServerMigrationFlow =
+  (typeof ServerMigrationFlow)[keyof typeof ServerMigrationFlow]
+
+/** Where a commit-point checkpoint goes, once the server's answer and the device's record
+ *  of a confirmed start are read together. */
+export const CommitPointRoute = {
+  /** Back to the commit screen. */
+  Resume: "resume",
+  /** Support cleared a flow that had started: begin again. */
+  Restart: "restart",
+  /** The funds moved; the background resume finishes the swap. Stay put and say so. */
+  AwaitSwap: "await-swap",
+  /** No answer to act on: stay put and ask the server again. */
+  AskAgain: "ask-again",
+  /** An answer this build cannot act on: hand the user to support. */
+  HandOver: "hand-over",
+} as const
+
+export type CommitPointRoute = (typeof CommitPointRoute)[keyof typeof CommitPointRoute]

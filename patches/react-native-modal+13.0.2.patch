@@ -1,0 +1,72 @@
+diff --git a/node_modules/react-native-modal/dist/modal.js b/node_modules/react-native-modal/dist/modal.js
+index 6d01fcc..b018946 100644
+--- a/node_modules/react-native-modal/dist/modal.js
++++ b/node_modules/react-native-modal/dist/modal.js
+@@ -1,5 +1,5 @@
+ import * as React from 'react';
+-import { Animated, BackHandler, DeviceEventEmitter, Dimensions, InteractionManager, KeyboardAvoidingView, Modal, PanResponder, Platform, TouchableWithoutFeedback, View, } from 'react-native';
++import { Animated, BackHandler, DeviceEventEmitter, Dimensions, KeyboardAvoidingView, Modal, PanResponder, Platform, TouchableWithoutFeedback, View, } from 'react-native';
+ import * as animatable from 'react-native-animatable';
+ import { buildAnimations, initializeAnimations, reversePercentage, } from './utils';
+ import styles from './modal.style';
+@@ -115,7 +115,7 @@ export class ReactNativeModal extends React.Component {
+             this.didUpdateDimensionsEmitter.remove();
+         }
+         if (this.interactionHandle) {
+-            InteractionManager.clearInteractionHandle(this.interactionHandle);
++            
+             this.interactionHandle = null;
+         }
+     }
+@@ -393,14 +393,14 @@ export class ReactNativeModal extends React.Component {
+         if (this.contentRef) {
+             this.props.onModalWillShow && this.props.onModalWillShow();
+             if (this.interactionHandle == null) {
+-                this.interactionHandle = InteractionManager.createInteractionHandle();
++                this.interactionHandle = null; // interaction handles were removed in RN 0.88
+             }
+             this.contentRef
+                 .animate(this.animationIn, this.props.animationInTiming)
+                 .then(() => {
+                 this.isTransitioning = false;
+                 if (this.interactionHandle) {
+-                    InteractionManager.clearInteractionHandle(this.interactionHandle);
++                    
+                     this.interactionHandle = null;
+                 }
+                 if (!this.props.isVisible) {
+@@ -439,14 +439,14 @@ export class ReactNativeModal extends React.Component {
+         if (this.contentRef) {
+             this.props.onModalWillHide && this.props.onModalWillHide();
+             if (this.interactionHandle == null) {
+-                this.interactionHandle = InteractionManager.createInteractionHandle();
++                this.interactionHandle = null; // interaction handles were removed in RN 0.88
+             }
+             this.contentRef
+                 .animate(animationOut, this.props.animationOutTiming)
+                 .then(() => {
+                 this.isTransitioning = false;
+                 if (this.interactionHandle) {
+-                    InteractionManager.clearInteractionHandle(this.interactionHandle);
++                    
+                     this.interactionHandle = null;
+                 }
+                 if (this.props.isVisible) {
+@@ -537,9 +537,14 @@ export class ReactNativeModal extends React.Component {
+                 this.makeBackdrop(),
+                 containerView));
+         }
+-        return (React.createElement(Modal, { transparent: true, animationType: 'none', visible: this.state.isVisible, onRequestClose: onBackButtonPress, ...otherProps },
+-            this.makeBackdrop(),
+-            avoidKeyboard ? (React.createElement(KeyboardAvoidingView, { behavior: Platform.OS === 'ios' ? 'padding' : undefined, pointerEvents: "box-none", style: computedStyle.concat([{ margin: 0 }]) }, containerView)) : (containerView)));
++        // Workaround for react-native-modal + New Architecture (Fabric):
++        // wrapping the Modal in a View stabilises Fabric's layout measurement and
++        // prevents the modal from rendering incorrectly (black / misaligned / blank).
++        // See https://github.com/react-native-modal/react-native-modal/issues/* (newArch).
++        return (React.createElement(View, { pointerEvents: "box-none" },
++            React.createElement(Modal, { transparent: true, animationType: 'none', visible: this.state.isVisible, onRequestClose: onBackButtonPress, ...otherProps },
++                this.makeBackdrop(),
++                avoidKeyboard ? (React.createElement(KeyboardAvoidingView, { behavior: Platform.OS === 'ios' ? 'padding' : undefined, pointerEvents: "box-none", style: computedStyle.concat([{ margin: 0 }]) }, containerView)) : (containerView))));
+     }
+ }
+ export default ReactNativeModal;

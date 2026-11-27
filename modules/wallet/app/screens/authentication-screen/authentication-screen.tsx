@@ -1,0 +1,219 @@
+import * as React from "react"
+import { Alert, View } from "react-native"
+
+import { GaloyPrimaryButton } from "@app/components/atomic/galoy-primary-button"
+import { GaloySecondaryButton } from "@app/components/atomic/galoy-secondary-button"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { recordAppError } from "@app/utils/error-reporting"
+import { RouteProp, useNavigation } from "@react-navigation/native"
+import { NativeStackNavigationProp } from "@react-navigation/native-stack"
+import { makeStyles } from "@rn-vui/themed"
+
+import { PinErrorKey } from "./pin-verification"
+import { useForgottenPinEscape } from "./use-forgotten-pin-escape"
+import { useUnlockScreen } from "./unlock-screen"
+
+import { AfribitLogo } from "../../components/afribit-logo"
+import { Screen } from "../../components/screen"
+import useLogout from "../../hooks/use-logout"
+import { useLogoutAndRoute } from "../../hooks/use-logout-and-route"
+import type { RootStackParamList } from "../../navigation/stack-param-lists"
+import BiometricWrapper from "../../utils/biometricAuthentication"
+import { AuthenticationScreenPurpose, PinScreenPurpose } from "../../utils/enum"
+import KeyStoreWrapper from "../../utils/storage/secureStorage"
+
+type Props = {
+  route: RouteProp<RootStackParamList, "authentication">
+}
+
+export const AuthenticationScreen: React.FC<Props> = ({ route }) => {
+  const navigation =
+    useNavigation<NativeStackNavigationProp<RootStackParamList, "authentication">>()
+
+  const styles = useStyles()
+  const { logout } = useLogout()
+  const { screenPurpose, isPinEnabled, isResume = false } = route.params
+  const { completeUnlock } = useUnlockScreen({ isResume })
+  const { routeAfterLogout } = useLogoutAndRoute()
+  const { escape, confirmRemoveWallets } = useForgottenPinEscape()
+  const { LL } = useI18nContext()
+
+  const handleAuthenticationSuccess = React.useCallback(async () => {
+    if (screenPurpose === AuthenticationScreenPurpose.Authenticate) {
+      // Awaited so a kill right after unlock can't leave a spent budget behind
+      // for a user who has just proven who they are biometrically. Unlock is
+      // never refused over it — but a clear that could not land leaves a spent
+      // attempt budget readable, so it is reported rather than dropped.
+      if (!(await KeyStoreWrapper.clearPinFailureState())) {
+        recordAppError(new Error("PIN attempt count could not be cleared"), {
+          alwaysRecord: true,
+          dedupKey: PinErrorKey.AttemptsClear,
+        })
+      }
+    } else if (screenPurpose === AuthenticationScreenPurpose.TurnOnAuthentication) {
+      KeyStoreWrapper.setIsBiometricsEnabled()
+    }
+    completeUnlock((coldStartRoute) => navigation.replace(coldStartRoute))
+  }, [navigation, screenPurpose, completeUnlock])
+
+  const attemptAuthentication = React.useCallback(() => {
+    let description = "attemptAuthentication. should not be displayed?"
+    if (screenPurpose === AuthenticationScreenPurpose.Authenticate) {
+      description = LL.AuthenticationScreen.authenticationDescription()
+    } else if (screenPurpose === AuthenticationScreenPurpose.TurnOnAuthentication) {
+      description = LL.AuthenticationScreen.setUpAuthenticationDescription()
+    }
+    // Presents the OS specific authentication prompt
+    BiometricWrapper.authenticate(description, handleAuthenticationSuccess, () => {})
+  }, [screenPurpose, handleAuthenticationSuccess, LL.AuthenticationScreen])
+
+  React.useEffect(() => {
+    attemptAuthentication()
+    // only run this on first visit to screen
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const logoutFromLock = async () => {
+    const { isAppLockKept } = await logout()
+    Alert.alert(LL.common.logout(), LL.common.loggedOut(), [
+      {
+        text: LL.common.ok(),
+        /** Both ways out live in the shared logout route: a lock the logout kept is owed
+         *  an answer and goes back through the gate, and one that went takes the flag with
+         *  it and lands on the landing screen. */
+        onPress: () => routeAfterLogout(isAppLockKept),
+      },
+    ])
+  }
+
+  const confirmLogout = () => {
+    Alert.alert(LL.common.confirm(), LL.AuthenticationScreen.confirmLogout(), [
+      {
+        text: LL.common.cancel(),
+      },
+      {
+        text: LL.common.confirm(),
+        onPress: logoutFromLock,
+      },
+    ])
+  }
+
+  let PinButtonContent
+  let EscapeContent
+  let AlternateContent
+
+  if (isPinEnabled) {
+    PinButtonContent = (
+      <GaloySecondaryButton
+        title={LL.AuthenticationScreen.usePin()}
+        onPress={() =>
+          navigation.navigate("pin", {
+            screenPurpose: PinScreenPurpose.AuthenticatePin,
+            isResume,
+          })
+        }
+        containerStyle={styles.buttonContainer}
+      />
+    )
+  } else {
+    PinButtonContent = null
+  }
+
+  /** Where a logout would keep the lock, it only comes back to this screen, so the way out
+   *  offered there is removing the wallets the lock is kept for. */
+  if (escape === "removeWallets") {
+    EscapeContent = (
+      <GaloySecondaryButton
+        title={LL.AuthenticationScreen.forgotPin()}
+        onPress={confirmRemoveWallets}
+        containerStyle={styles.buttonContainer}
+      />
+    )
+  } else if (escape === "logout") {
+    EscapeContent = (
+      <GaloySecondaryButton
+        title={LL.common.logout()}
+        onPress={confirmLogout}
+        containerStyle={styles.buttonContainer}
+      />
+    )
+  } else {
+    EscapeContent = null
+  }
+
+  if (screenPurpose === AuthenticationScreenPurpose.Authenticate) {
+    AlternateContent = (
+      <>
+        {PinButtonContent}
+        {EscapeContent}
+      </>
+    )
+  } else if (screenPurpose === AuthenticationScreenPurpose.TurnOnAuthentication) {
+    AlternateContent = (
+      <GaloySecondaryButton
+        title={LL.AuthenticationScreen.skip()}
+        onPress={() => navigation.replace("Primary")}
+        containerStyle={styles.buttonContainer}
+      />
+    )
+  } else {
+    AlternateContent = null
+  }
+
+  let buttonTitle = ""
+  if (screenPurpose === AuthenticationScreenPurpose.Authenticate) {
+    buttonTitle = LL.AuthenticationScreen.unlock()
+  } else if (screenPurpose === AuthenticationScreenPurpose.TurnOnAuthentication) {
+    buttonTitle = LL.AuthenticationScreen.setUp()
+  }
+
+  return (
+    <Screen>
+      <View style={styles.container}>
+        <View style={styles.logoWrapper}>
+          <View style={styles.logoContainer}>
+            <AfribitLogo size={288} />
+          </View>
+        </View>
+        <View style={styles.bottom}>
+          <GaloyPrimaryButton
+            title={buttonTitle}
+            onPress={attemptAuthentication}
+            containerStyle={styles.buttonContainer}
+          />
+          {AlternateContent}
+        </View>
+      </View>
+    </Screen>
+  )
+}
+
+const useStyles = makeStyles(() => ({
+  container: {
+    flex: 1,
+  },
+  bottom: {
+    alignItems: "center",
+    flex: 1,
+    justifyContent: "flex-end",
+    marginBottom: 36,
+    width: "100%",
+  },
+  buttonContainer: {
+    marginVertical: 12,
+  },
+  logoWrapper: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  logoContainer: {
+    width: 288,
+    height: 288,
+  },
+}))

@@ -1,0 +1,209 @@
+import React, { useEffect } from "react"
+import { ActivityIndicator, I18nManager, useWindowDimensions, View } from "react-native"
+import { Gesture, GestureDetector } from "react-native-gesture-handler"
+import Animated, {
+  Extrapolate,
+  Extrapolation,
+  FadeIn,
+  FadeOut,
+  interpolate,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from "react-native-reanimated"
+
+import { testProps } from "@app/utils/testProps"
+import { Text, makeStyles, useTheme } from "@rn-vui/themed"
+import { fonts } from "@app/rne-theme/fonts"
+
+import { MAX_FONT_SIZE_MULTIPLIER } from "@app/rne-theme/text-scaling"
+
+import { GaloyIcon } from "../galoy-icon"
+
+/** The track spans the screen less the padding its callers put either side. */
+const TRACK_INSET = 40
+/** How far short of the track's end the travel stops. Not the handle's width, which is
+ *  60: this is the pre-existing figure, kept so the commit threshold does not move. */
+const TRAVEL_INSET = 50
+/** The knob's diameter, which the label has to stay clear of. */
+const SWIPE_KNOB_SIZE = 60
+const isRTL = I18nManager.isRTL
+
+type SwipeButtonPropsType = {
+  onSwipe: () => void
+  initialText: string
+  loadingText: string
+  isLoading?: boolean
+  disabled?: boolean
+}
+
+const GaloySliderButton = ({
+  onSwipe,
+  initialText,
+  loadingText,
+  isLoading = false,
+  disabled = false,
+}: SwipeButtonPropsType) => {
+  const {
+    theme: { colors },
+  } = useTheme()
+  const { width: screenWidth } = useWindowDimensions()
+  const buttonWidth = screenWidth - TRACK_INSET
+  const swipeRange = buttonWidth - TRAVEL_INSET
+  const styles = useStyles({ buttonWidth })
+
+  const X = useSharedValue(0)
+
+  useEffect(() => {
+    if (!isLoading) {
+      X.value = withSpring(0)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading])
+
+  const panGesture = Gesture.Pan()
+    .enabled(!isLoading && !disabled)
+    .onUpdate((e) => {
+      const newValue = Math.abs(e.translationX)
+
+      if (newValue >= 0 && newValue <= swipeRange) {
+        X.value = newValue
+      }
+    })
+    .onEnd(() => {
+      if (X.value < swipeRange * 0.6) {
+        X.value = withSpring(0)
+      } else {
+        runOnJS(onSwipe)()
+      }
+    })
+
+  const AnimatedStyles = {
+    swipeButton: useAnimatedStyle(() => {
+      const translateX = interpolate(
+        X.value,
+        [20, buttonWidth],
+        [0, buttonWidth],
+        Extrapolation.CLAMP,
+      )
+
+      return {
+        transform: [
+          {
+            translateX: isRTL ? -translateX : translateX,
+          },
+        ],
+      }
+    }, [X, isRTL, buttonWidth]),
+    swipeText: useAnimatedStyle(() => {
+      const translateX = interpolate(
+        X.value,
+        [20, swipeRange],
+        [0, buttonWidth / 3],
+        Extrapolate.CLAMP,
+      )
+      return {
+        opacity: interpolate(X.value, [0, buttonWidth / 4], [1, 0], Extrapolate.CLAMP),
+        transform: [
+          {
+            translateX: isRTL ? -translateX : translateX,
+          },
+        ],
+      }
+    }, [X, isRTL, buttonWidth, swipeRange]),
+  }
+
+  return (
+    <View style={styles.swipeButtonContainer}>
+      {!isLoading && (
+        <GestureDetector gesture={panGesture}>
+          <Animated.View
+            style={[
+              styles.swipeButton,
+              AnimatedStyles.swipeButton,
+              { backgroundColor: disabled ? colors.disabled : colors.accent },
+            ]}
+            exiting={FadeOut.duration(400)}
+            {...testProps("slider")}
+          >
+            {isRTL ? (
+              <GaloyIcon size={30} name="arrow-left" color="white" />
+            ) : (
+              <GaloyIcon size={30} name="arrow-right" color="white" />
+            )}
+          </Animated.View>
+        </GestureDetector>
+      )}
+      {!disabled && (
+        <Animated.Text
+          maxFontSizeMultiplier={MAX_FONT_SIZE_MULTIPLIER}
+          style={[styles.swipeText, styles.knobClearance, AnimatedStyles.swipeText]}
+        >
+          {initialText}
+        </Animated.Text>
+      )}
+      {isLoading && (
+        <Animated.View entering={FadeIn.duration(400)} style={styles.loadingContainer}>
+          <Text style={styles.swipeText}>{loadingText}</Text>
+          <ActivityIndicator size="small" color={colors.accent} />
+        </Animated.View>
+      )}
+    </View>
+  )
+}
+
+const useStyles = makeStyles(({ colors }, { buttonWidth }: { buttonWidth: number }) => ({
+  swipeButtonContainer: {
+    height: 60,
+    backgroundColor: colors.surfaceInteractive,
+    borderRadius: 30,
+    borderColor: colors.neutral,
+    borderWidth: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    flexDirection: "row",
+    width: buttonWidth,
+    position: "relative",
+  },
+  swipeButton: {
+    position: "absolute",
+    left: 0,
+    height: SWIPE_KNOB_SIZE,
+    width: SWIPE_KNOB_SIZE,
+    borderRadius: 30,
+    zIndex: 3,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  swipeText: {
+    alignSelf: "center",
+    textAlign: "center",
+    fontSize: 14,
+    fontFamily: fonts.regular,
+    zIndex: 2,
+    color: colors.textMuted,
+  },
+  /** The knob rides over the left of the track, so the idle label keeps clear of it rather
+   *  than running underneath: at the larger text sizes it grew into the knob and read as a
+   *  half word. Only the left needs clearing, as the label reads to the knob's right. The
+   *  loading label goes without it: the knob is gone by then and the label centres. */
+  knobClearance: {
+    paddingLeft: SWIPE_KNOB_SIZE + 10,
+    paddingRight: 12,
+  },
+  loadingContainer: {
+    display: "flex",
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    columnGap: 10,
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    top: 0,
+  },
+}))
+
+export default GaloySliderButton

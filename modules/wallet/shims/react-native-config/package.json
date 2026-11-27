@@ -1,0 +1,8 @@
+{
+  "name": "react-native-config",
+  "version": "0.0.0-afribit.1",
+  "description": "Afribit stand-in: wallet build settings come from the shell's app config (extra.wallet), not a native .env reader",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

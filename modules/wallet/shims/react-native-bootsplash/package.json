@@ -1,0 +1,8 @@
+{
+  "name": "react-native-bootsplash",
+  "version": "0.0.0-afribit.1",
+  "description": "Afribit stand-in: the shell owns the launch screen, so the wallet's hide call has nothing to hide",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

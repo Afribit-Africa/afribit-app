@@ -1,0 +1,236 @@
+import React from "react"
+import { Linking } from "react-native"
+import ReactNativeModal from "react-native-modal"
+
+import { CONTACT_EMAIL_ADDRESS, WHATSAPP_CONTACT_NUMBER } from "@app/config"
+import { AFRIBIT_LINKS } from "@app/config/afribit-links"
+import { useClipboard } from "@app/hooks/use-clipboard"
+import { useContactSupport } from "@app/hooks/use-contact-support"
+import { useI18nContext } from "@app/i18n/i18n-react"
+import { openWhatsApp } from "@app/utils/external"
+import { Icon, ListItem, makeStyles, useTheme, Text } from "@rn-vui/themed"
+
+import TelegramOutline from "./telegram.svg"
+
+export const TELEGRAM_COMMUNITY_URL = "https://t.me/blinkbtc"
+
+export const SupportChannels = {
+  Email: "email",
+  EmailCopy: "emailCopy",
+  Telegram: "telegram",
+  WhatsApp: "whatsapp",
+  StatusPage: "statusPage",
+  Faq: "faq",
+} as const
+
+export type SupportChannels = (typeof SupportChannels)[keyof typeof SupportChannels]
+
+type Props = {
+  isVisible: boolean
+  toggleModal: () => void
+  messageBody: string
+  messageSubject: string
+  supportChannels: SupportChannels[]
+}
+
+/*
+A modal component that displays contact options at the bottom of the screen.
+*/
+const ContactModal: React.FC<Props> = ({
+  isVisible,
+  toggleModal,
+  messageBody,
+  messageSubject,
+  supportChannels,
+}) => {
+  const { LL } = useI18nContext()
+  const styles = useStyles()
+  const {
+    theme: { colors },
+  } = useTheme()
+  const { supportEmailAddress } = useContactSupport()
+  const { copyToClipboard } = useClipboard()
+
+  const contactOptionList: {
+    id: SupportChannels
+    name: string
+    icon: React.ReactElement
+    rightIcon?: React.ReactElement
+    action: () => void
+  }[] = [
+    {
+      id: SupportChannels.StatusPage,
+      name: LL.support.statusPage(),
+      icon: <Icon name={"alert-circle-outline"} type="ionicon" size={20} />,
+      action: () => {
+        // TODO: extract in Instance
+        Linking.openURL(`https://blink.statuspage.io/`)
+      },
+    },
+    ...(AFRIBIT_LINKS.faq
+      ? [
+          {
+            id: SupportChannels.Faq,
+            name: LL.support.faq(),
+            icon: (
+              <Icon
+                name={"book-outline"}
+                type="ionicon"
+                color={colors.textOnBackground}
+                size={20}
+              />
+            ),
+            action: () => {
+              Linking.openURL(AFRIBIT_LINKS.faq)
+              toggleModal()
+            },
+          },
+        ]
+      : []),
+    {
+      id: SupportChannels.Telegram,
+      name: LL.support.telegram(),
+      icon: <TelegramOutline width={20} height={20} fill={colors.textOnBackground} />,
+      action: () => {
+        Linking.openURL(TELEGRAM_COMMUNITY_URL)
+        toggleModal()
+      },
+    },
+    ...(WHATSAPP_CONTACT_NUMBER
+      ? [
+          {
+            id: SupportChannels.WhatsApp,
+            name: LL.support.whatsapp(),
+            icon: (
+              <Icon
+                name={"logo-whatsapp"}
+                type="ionicon"
+                color={colors.textOnBackground}
+                size={20}
+              />
+            ),
+            action: () => {
+              openWhatsAppAction(messageBody)
+              toggleModal()
+            },
+          },
+        ]
+      : []),
+    ...(CONTACT_EMAIL_ADDRESS
+      ? [
+          {
+            id: SupportChannels.Email,
+            name: LL.support.email(),
+            icon: (
+              <Icon
+                name={"mail-outline"}
+                type="ionicon"
+                color={colors.textOnBackground}
+                size={20}
+              />
+            ),
+            action: () => {
+              Linking.openURL(
+                `mailto:${CONTACT_EMAIL_ADDRESS}?subject=${encodeURIComponent(
+                  messageSubject,
+                )}&body=${encodeURIComponent(messageBody)}`,
+              )
+              toggleModal()
+            },
+          },
+        ]
+      : []),
+    ...(supportEmailAddress
+      ? [
+          {
+            id: SupportChannels.EmailCopy,
+            name: supportEmailAddress,
+            icon: (
+              <Icon
+                name={"mail-outline"}
+                type="ionicon"
+                color={colors.textOnBackground}
+                size={20}
+              />
+            ),
+            rightIcon: (
+              <Icon
+                name={"copy-outline"}
+                type="ionicon"
+                color={colors.accent}
+                size={20}
+              />
+            ),
+            action: () => {
+              copyToClipboard({
+                content: supportEmailAddress,
+                message: LL.support.emailCopied({ email: supportEmailAddress }),
+              })
+              toggleModal()
+            },
+          },
+        ]
+      : []),
+  ]
+
+  return (
+    <ReactNativeModal
+      isVisible={isVisible}
+      backdropOpacity={0.8}
+      backdropColor={colors.backgroundDefault}
+      onBackdropPress={toggleModal}
+      style={styles.modal}
+    >
+      {contactOptionList
+        .filter((item) => supportChannels.includes(item.id))
+        .map((item) => {
+          return (
+            <ListItem
+              key={item.name}
+              bottomDivider
+              onPress={item.action}
+              containerStyle={styles.listItemContainer}
+            >
+              {item.icon}
+              <ListItem.Content>
+                <ListItem.Title style={styles.listItemTitle}>
+                  <Text type="p2">{item.name}</Text>
+                </ListItem.Title>
+              </ListItem.Content>
+              {item.rightIcon ?? (
+                <ListItem.Chevron
+                  name={"chevron-forward"}
+                  type="ionicon"
+                  color={colors.accent}
+                  size={20}
+                />
+              )}
+            </ListItem>
+          )
+        })}
+    </ReactNativeModal>
+  )
+}
+
+export default ContactModal
+
+export const openWhatsAppAction = (message: string) => {
+  openWhatsApp(WHATSAPP_CONTACT_NUMBER, message)
+}
+
+const useStyles = makeStyles(({ colors }) => ({
+  modal: {
+    justifyContent: "flex-end",
+    flexGrow: 1,
+    marginHorizontal: 0,
+  },
+  listItemContainer: {
+    backgroundColor: colors.surfaceInteractive,
+  },
+  listItemTitle: {
+    color: colors.textOnBackground,
+  },
+  icons: {
+    color: colors.textOnBackground,
+  },
+}))

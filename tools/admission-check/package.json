@@ -1,0 +1,6 @@
+{
+  "name": "@afribit/admission-check",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Static admission rules every feature app must pass before it ships."
+}

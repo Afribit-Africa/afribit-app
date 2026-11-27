@@ -1,0 +1,87 @@
+{
+  "package": "@unomed/react-native-matrix-sdk",
+  "version": "0.10.2",
+  "archive": {
+    "url": "https://github.com/unomed-dev/react-native-matrix-sdk/releases/download/0.10.2/binaries.tar.gz",
+    "sha256": "704ff5326e9d851e0b6361351c96c3a7c492e488758c4b173c061938d946efe7",
+    "bytes": 252098470
+  },
+  "files": {
+    "android/src/main/jniLibs/arm64-v8a/libmatrix_sdk_ffi.so": {
+      "sha256": "f288a98910842ad477c9b47307893756a2a568d00adaf8afd40cef1a1f8e475b",
+      "bytes": 131788160
+    },
+    "android/src/main/jniLibs/armeabi-v7a/libmatrix_sdk_ffi.so": {
+      "sha256": "cfde456780b5d5e0fafe3c902ce3ab65ec6f342065072204be56e0a49b23dd5b",
+      "bytes": 98472876
+    },
+    "build/RnMatrixRustSdk.xcframework/Info.plist": {
+      "sha256": "437695f36e172b6b132c2afdcc6073cb2b8310d3a0297e7a70af9fbacdcd571e",
+      "bytes": 1284
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64/Headers/matrix_sdkFFI.h": {
+      "sha256": "bfa73a44fbd901b9a1a919a58bf003ebeda38f666e223733e08ad3a47a7e6f20",
+      "bytes": 20668
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64/Headers/matrix_sdk_baseFFI.h": {
+      "sha256": "387c558d754b75bb98bc3f0905e5631db05a1666dc307e35de03ee115eaa44f6",
+      "bytes": 20366
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64/Headers/matrix_sdk_commonFFI.h": {
+      "sha256": "3a22d33577ae8f12eca3458b5a1bab4ed2469e41420975a17be05f341ac2f20c",
+      "bytes": 20684
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64/Headers/matrix_sdk_cryptoFFI.h": {
+      "sha256": "4821cdf9d356c98f211616feff4c506dae1b8c2238da4918c04ae34ecbf978de",
+      "bytes": 22259
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64/Headers/matrix_sdk_ffiFFI.h": {
+      "sha256": "f3174e519775458abaec516e7ea3edd59bbf57886e1d23179fd8941046188469",
+      "bytes": 434205
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64/Headers/matrix_sdk_uiFFI.h": {
+      "sha256": "29dcb5e2708f164b2657ad02b9d4539de721b1e17919e0a93d5d3cce2dbae9ef",
+      "bytes": 20048
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64/Headers/module.modulemap": {
+      "sha256": "e7d9983cce2cb55f72d863f3b528249a08b750efb016e3357d089faa34251d03",
+      "bytes": 880
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64/libmatrix_sdk_ffi.a": {
+      "sha256": "cb508bb54b098af1c708280b1258714d149fa05dc7cc19c06f8a9fc0e4774e61",
+      "bytes": 278050080
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64_x86_64-simulator/Headers/matrix_sdkFFI.h": {
+      "sha256": "bfa73a44fbd901b9a1a919a58bf003ebeda38f666e223733e08ad3a47a7e6f20",
+      "bytes": 20668
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64_x86_64-simulator/Headers/matrix_sdk_baseFFI.h": {
+      "sha256": "387c558d754b75bb98bc3f0905e5631db05a1666dc307e35de03ee115eaa44f6",
+      "bytes": 20366
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64_x86_64-simulator/Headers/matrix_sdk_commonFFI.h": {
+      "sha256": "3a22d33577ae8f12eca3458b5a1bab4ed2469e41420975a17be05f341ac2f20c",
+      "bytes": 20684
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64_x86_64-simulator/Headers/matrix_sdk_cryptoFFI.h": {
+      "sha256": "4821cdf9d356c98f211616feff4c506dae1b8c2238da4918c04ae34ecbf978de",
+      "bytes": 22259
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64_x86_64-simulator/Headers/matrix_sdk_ffiFFI.h": {
+      "sha256": "f3174e519775458abaec516e7ea3edd59bbf57886e1d23179fd8941046188469",
+      "bytes": 434205
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64_x86_64-simulator/Headers/matrix_sdk_uiFFI.h": {
+      "sha256": "29dcb5e2708f164b2657ad02b9d4539de721b1e17919e0a93d5d3cce2dbae9ef",
+      "bytes": 20048
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64_x86_64-simulator/Headers/module.modulemap": {
+      "sha256": "e7d9983cce2cb55f72d863f3b528249a08b750efb016e3357d089faa34251d03",
+      "bytes": 880
+    },
+    "build/RnMatrixRustSdk.xcframework/ios-arm64_x86_64-simulator/libmatrix_sdk_ffi.a": {
+      "sha256": "edc3f1aa50e1604ee5a8747f7e6425af5fcea476f2987d91fd3135538bcaedcf",
+      "bytes": 551915064
+    }
+  }
+}
