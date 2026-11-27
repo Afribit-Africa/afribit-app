@@ -71,12 +71,12 @@ One app, three built-in parts, and a shell that keeps them apart.
 
 | Area | Status |
 |---|---|
-| **Android app** | **Builds as a full release APK** (about 95 MB for arm64) with Wallet, Chat and Mesh inside. Tested end to end on the Android emulator (details below). A public preview of the earlier app is downloadable, and the standalone Afribit Wallet 1.0.1 is released and downloadable. **Not yet done:** a release of the current one-app build, a test with real funds inside the one app, and a field test on physical phones. |
-| **iPhone app** | Same codebase. Cloud builds for the iOS simulator are being brought up. The last two blockers were native-library conflicts between the Bitcoin and Matrix SDKs, which are fixed, and a Google sign-in packaging issue, for which a fix is building now. Installing on real iPhones and TestFlight needs the Afribit Apple Developer account. |
+| **Android app** | **Preview 0.2.0 is released** on [GitHub Releases](https://github.com/Afribit-Africa/afribit-app/releases/tag/v0.2.0): a downloadable APK (about 95 MB, arm64) with Wallet, Chat and Mesh inside, built from the tagged commit, with its SHA-256 checksum. Tested end to end on the Android emulator (details below). The standalone Afribit Wallet 1.0.1 is also released. **Not yet done:** a test with real funds inside the one app, and a field test on physical phones. |
+| **iPhone app** | Same codebase. **The full app now builds for the iOS simulator** in the cloud (27 November), after fixing native-library conflicts between the Bitcoin and Matrix SDKs and two packaging issues. These fixes go into the next public release. **Open:** a walk-through on the simulator, then real iPhones and TestFlight, which need the Afribit Apple Developer account. |
 | **Wallet** | Integrated inside the app. Verified on the emulator: create a self-custodial account behind the PIN, receive (a real mainnet Lightning invoice), send up to the fee and confirmation step, add and switch accounts, and relock after inactivity. Payment links and payments started from Chat are done. **Open:** a small real-money send and receive test (capped at about 100 KES). |
 | **Chat** | The Matrix encryption engine is proven on a phone: an encrypted message from a second device was decrypted, an encrypted reply was sent, and the server held only ciphertext. The UI, contact verification, encrypted images, screen protection, QR contacts and Kiswahili are done. **In progress:** paying and requesting money in a chat. **Open:** an in-app two-device verification test, running chat from the mesh, and policy decisions on message retention and abuse reporting. |
 | **Mesh / Connect** | Pass status, buying passes (M-Pesa or Lightning), reminders, "buy again" and the "what works now" list are done in the app. The matching mesh-service API is written. **Open:** routers that cryptographically sign their identity so phones can trust them, the Wi-Fi login page handing over to the app, and deploying to the live mesh. |
-| **Quality** | About 620 automated tests for the app shell and about 4,100 for the wallet run on every change. Every change is reviewed before it merges. |
+| **Quality** | About 680 automated tests for the app shell and about 4,100 for the wallet run on every change. Every change is reviewed before it merges. |
 
 ### Technology
 - **App:** React Native 0.88 (New Architecture), Expo SDK 58 and TypeScript. One codebase for Android and iOS.
@@ -88,8 +88,8 @@ One app, three built-in parts, and a shell that keeps them apart.
 ## 6. The way forward
 
 ### Phase 1: finish the first complete release (next 4–6 weeks)
-1. iPhone simulator build green, then a TestFlight build.
-2. A real-money wallet test (small amounts), then a signed Android preview of the one-app build for testers.
+1. iPhone: a walk-through on the simulator, then a TestFlight build.
+2. A real-money wallet test (small amounts), then testers on physical Android phones.
 3. Payments inside chat: pay a contact and request money.
 4. Keep development in the open: public issues, a public roadmap, and releases built from tagged commits.
 
